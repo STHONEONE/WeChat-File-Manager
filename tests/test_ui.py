@@ -13,5 +13,5 @@ def test_ui(tmp_path):
     window.table.selectRow(0); app.processEvents(); assert window.active['name']=='测试.pdf'
     window.note.setPlainText('论文备注'); window.tags.setText('科研'); window.favorite.setChecked(True); window.save_note()
     assert store.search(favorite=True,tag='科研')[0]['note']=='论文备注'
-    window.query.setText('不存在'); window.reload(); assert window.model.rowCount()==0
+    window.switch_page('search'); window.query.setText('不存在'); window.reload(); assert window.model.rowCount()==0
     window.query.clear(); window.reload(); window.grab().save(str(tmp_path/'ui.png')); window.close()

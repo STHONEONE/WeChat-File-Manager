@@ -19,12 +19,13 @@ def test_confirmation_requires_both_explicit_acknowledgements(tmp_path):
 
 def test_duplicate_rows_never_auto_checked(tmp_path):
     app=QApplication.instance() or QApplication([]);store,p,other=dataset(tmp_path);store.detect_duplicates(settle_seconds=0)
-    dialog=DuplicatesDialog(store,lambda:None,lambda:None);dialog.groups.setCurrentItem(dialog.groups.topLevelItem(0))
+    dialog=DuplicatesDialog(store,lambda:None,lambda:None);dialog.groups.setCurrentItem(dialog.groups.topLevelItem(1))
     assert not dialog.model.checked_rows()
     dialog.members.selectRow(0);assert not dialog.model.checked_rows()
     dialog.model.setData(dialog.model.index(0,0),Qt.CheckState.Checked,Qt.ItemDataRole.CheckStateRole)
     assert len(dialog.model.checked_rows())==1
-    dialog.groups.setCurrentItem(dialog.groups.topLevelItem(1));assert not dialog.model.checked_rows();dialog.close()
+    dialog.groups.setCurrentItem(dialog.groups.topLevelItem(2));assert not dialog.model.checked_rows()
+    dialog.groups.setCurrentItem(dialog.groups.topLevelItem(1));assert len(dialog.model.checked_rows())==1;dialog.close()
 
 def test_directory_details_and_jump_keep_real_structure(tmp_path):
     app=QApplication.instance() or QApplication([]);store,root,p,backend,service=setup(tmp_path)

@@ -28,7 +28,7 @@ class WindowsRecycle:
         if result<0:raise OSError(f'无法确认该磁盘回收站可用（HRESULT {result:#x}），已拒绝删除。')
 
     @contextmanager
-    def pin(self,path,root):
+    def pin(self,path,root,retain=False):
         """Deny content writers; pin ancestors against rename/reparse replacement."""
         import win32file,win32con
         handles=[]
@@ -37,11 +37,16 @@ class WindowsRecycle:
             for parent in reversed(p.parents):
                 handle=win32file.CreateFile(str(parent),0x0080,win32con.FILE_SHARE_READ|win32con.FILE_SHARE_WRITE,None,win32con.OPEN_EXISTING,win32con.FILE_FLAG_BACKUP_SEMANTICS|win32file.FILE_FLAG_OPEN_REPARSE_POINT,None)
                 handles.append(handle)
-            handle=win32file.CreateFile(str(p),win32con.GENERIC_READ,win32con.FILE_SHARE_READ|win32con.FILE_SHARE_DELETE,None,win32con.OPEN_EXISTING,win32file.FILE_FLAG_OPEN_REPARSE_POINT,None)
+            share=win32con.FILE_SHARE_READ
+            if not retain:share|=win32con.FILE_SHARE_DELETE
+            handle=win32file.CreateFile(str(p),win32con.GENERIC_READ,share,None,win32con.OPEN_EXISTING,win32file.FILE_FLAG_OPEN_REPARSE_POINT,None)
             handles.append(handle)
             yield
         finally:
             for handle in reversed(handles):handle.Close()
+
+    def pin_keeper(self,path,root):
+        return self.pin(path,root,retain=True)
 
     def recycle(self,path,guard):
         import pythoncom
