@@ -4,7 +4,7 @@ import threading
 import time
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS accounts(path TEXT PRIMARY KEY, name TEXT, note TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS directories(path TEXT PRIMARY KEY, account TEXT, alias TEXT DEFAULT '', count INTEGER DEFAULT 0, size INTEGER DEFAULT 0);
@@ -81,6 +81,14 @@ class Database:
             db.execute('CREATE INDEX IF NOT EXISTS hash_groups ON hash_cache(valid,sha256,size)')
             db.execute('''CREATE TABLE IF NOT EXISTS account_scan_state(account TEXT PRIMARY KEY,scanned_at REAL,complete INTEGER,error TEXT)''')
             db.execute('PRAGMA user_version=4')
+        if version < 5:
+            if 'note' not in {r[1] for r in db.execute('PRAGMA table_info(directories)')}:db.execute("ALTER TABLE directories ADD COLUMN note TEXT DEFAULT ''")
+            db.execute('''CREATE TABLE IF NOT EXISTS deletion_log(id INTEGER PRIMARY KEY,operation_id TEXT,time REAL,path TEXT,size INTEGER,account TEXT,sha256 TEXT,result TEXT,reason TEXT)''')
+            db.execute('CREATE INDEX IF NOT EXISTS deletion_time ON deletion_log(time DESC,id DESC)')
+            if 'last_success' not in {r[1] for r in db.execute('PRAGMA table_info(account_scan_state)')}:
+                db.execute('ALTER TABLE account_scan_state ADD COLUMN last_success REAL')
+                db.execute('UPDATE account_scan_state SET last_success=scanned_at WHERE complete=1')
+            db.execute('PRAGMA user_version=5')
 
     def connect(self):
         self._lock.acquire()
@@ -114,6 +122,10 @@ class Database:
             for table,columns in {'files':{'mtime_ns','ctime_ns'},'hash_cache':{'path','size','mtime_ns','ctime_ns','identity','sha256','verified_at','valid'},'account_scan_state':{'account','scanned_at','complete','error'}}.items():
                 if not columns <= {r[1] for r in db.execute(f'PRAGMA table_info({table})')}:
                     raise ValueError('备份缺少 V1.2 数据结构：'+table)
+        if version>=5:
+            if 'note' not in {r[1] for r in db.execute('PRAGMA table_info(directories)')}:raise ValueError('备份缺少目录备注。')
+            if not {'id','operation_id','time','path','size','account','sha256','result','reason'} <= {r[1] for r in db.execute('PRAGMA table_info(deletion_log)')}:raise ValueError('备份缺少删除记录。')
+            if 'last_success' not in {r[1] for r in db.execute('PRAGMA table_info(account_scan_state)')}:raise ValueError('备份缺少成功扫描时间。')
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' LIMIT 1").fetchone():
             raise ValueError('备份包含不支持的触发器。')
         return version

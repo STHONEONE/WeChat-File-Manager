@@ -29,7 +29,8 @@ def main():
                     from app.selftest import run
                     run(window,data)
                 except Exception as e:
-                    (data/'selftest-error.txt').write_text(str(e),encoding='utf-8');app.exit(1);return
+                    import traceback
+                    (data/'selftest-error.txt').write_text(traceback.format_exc(),encoding='utf-8');app.exit(1);return
             window.grab().save(str(data/'smoke.png'))
             (data/'smoke.json').write_text(json.dumps({'rows':window.model.rowCount(),'qt_window_created':True}),encoding='utf-8')
             window.close(); app.quit()

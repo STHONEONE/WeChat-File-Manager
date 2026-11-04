@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QIdentityProxyModel, QTimer, QUrl,QObject
 from PySide6.QtGui import QDesktopServices, QImageReader, QPixmap, QIcon, QPainter, QColor, QFontDatabase, QFont
-from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLineEdit,QComboBox,QPushButton,QSplitter,QTreeWidget,QTreeWidgetItem,QTableView,QLabel,QTextEdit,QCheckBox,QFormLayout,QFileDialog,QMessageBox,QInputDialog,QMenu,QDoubleSpinBox,QDialog,QDialogButtonBox,QProgressBar)
+from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLineEdit,QComboBox,QPushButton,QSplitter,QTreeWidget,QTreeWidgetItem,QTableView,QLabel,QTextEdit,QCheckBox,QFormLayout,QFileDialog,QMessageBox,QInputDialog,QMenu,QDoubleSpinBox,QDialog,QDialogButtonBox,QProgressBar,QStackedWidget)
 from app.core import Store, CATEGORIES, LABELS, candidates, canonical, human, export_files
 from app.version import __version__
 
@@ -25,6 +25,9 @@ from app.ui.preview import PreviewController
 from app.ui.duplicates import DuplicatesDialog
 from app.ui.statistics_view import StatisticsDialog
 from app.file_monitor import FileMonitor
+from app.directory_mapper import describe_directory,virtual_sections
+from app.delete_service import DeleteService
+from app.ui.delete_dialog import DeleteDialog,DeleteHistoryDialog,RESULT_LABELS
 
 class MonitorSignals(QObject):
     updated=Signal(object)
@@ -61,7 +64,9 @@ class Window(QMainWindow):
         self.progress_label=QLabel('就绪');self.progress_label.setWordWrap(True);layout.addWidget(self.progress_label)
         self.progress_bar=QProgressBar();self.progress_bar.setRange(0,0);self.progress_bar.hide();layout.addWidget(self.progress_bar)
         splitter=QSplitter(); layout.addWidget(splitter,1)
-        self.tree=QTreeWidget(); self.tree.setHeaderLabel('文件导航'); splitter.addWidget(self.tree)
+        nav_panel=QWidget();nav_layout=QVBoxLayout(nav_panel);nav_layout.setContentsMargins(0,0,0,0)
+        self.directory_mode=QComboBox();self.directory_mode.addItems(['中文分类视图','真实目录视图']);self.directory_mode.setCurrentIndex(self.store.setting('directory:viewmode',0));nav_layout.addWidget(self.directory_mode)
+        self.tree=QTreeWidget(); self.tree.setHeaderLabel('文件导航');nav_layout.addWidget(self.tree); splitter.addWidget(nav_panel)
         self.model=FilesModel(); self.proxy=QIdentityProxyModel(); self.proxy.setSourceModel(self.model)
         self.table=QTableView(); self.table.setModel(self.proxy); self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows); self.table.setSelectionMode(QTableView.SelectionMode.ExtendedSelection); self.table.setSortingEnabled(True); self.table.setAlternatingRowColors(True); self.table.verticalHeader().hide(); self.table.setColumnWidth(0,360); self.table.setColumnWidth(3,155); splitter.addWidget(self.table)
         detail=QWidget(); form=QVBoxLayout(detail); self.info=QLabel('选择文件查看详情'); self.info.setWordWrap(True); self.info.setTextFormat(Qt.TextFormat.PlainText); self.info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse); form.addWidget(self.info)
@@ -76,7 +81,12 @@ class Window(QMainWindow):
         self.tags.textChanged.connect(self.edit_changed)
         self.favorite.toggled.connect(self.edit_changed)
         actions=QHBoxLayout(); form.addLayout(actions); self.button(actions,'保存备注',self.save_note); self.button(actions,'打开文件',self.open_file)
-        self.button(form,'打开所在文件夹',self.reveal); self.button(form,'复制路径',lambda:QApplication.clipboard().setText(self.path.toPlainText())); form.addStretch(); splitter.addWidget(detail); splitter.setSizes([240,850,320])
+        self.button(form,'打开所在文件夹',self.reveal); self.button(form,'复制路径',lambda:QApplication.clipboard().setText(self.path.toPlainText()));self.button(form,'在真实目录视图定位',self.jump_to_directory); form.addStretch()
+        self.detail_stack=QStackedWidget();self.detail_stack.addWidget(detail)
+        directory_pane=QWidget();directory_form=QVBoxLayout(directory_pane);self.dir_text=QTextEdit();self.dir_text.setReadOnly(True);directory_form.addWidget(self.dir_text)
+        self.button(directory_form,'打开实际目录',self.open_actual_directory);self.button(directory_form,'复制目录路径',lambda:QApplication.clipboard().setText(self.active_directory['path'] if self.active_directory else ''))
+        self.button(directory_form,'修改当前目录名称 / 备注',self.edit_active_directory);self.detail_stack.addWidget(directory_pane);self.active_directory=None
+        splitter.addWidget(self.detail_stack); splitter.setSizes([240,850,320])
         self.tree.itemSelectionChanged.connect(self.nav_changed); self.tree.itemDoubleClicked.connect(self.alias_dialog)
         self.table.selectionModel().selectionChanged.connect(self.selection_changed); self.table.doubleClicked.connect(lambda _:self.open_file())
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu); self.table.customContextMenuRequested.connect(self.context_menu)
@@ -86,6 +96,8 @@ class Window(QMainWindow):
         self.category.currentIndexChanged.connect(self.reload); self.account.currentIndexChanged.connect(self.rebuild_tree)
         self.model.sortRequested.connect(self.sort_changed)
         self.tree.itemExpanded.connect(self.expand_directory)
+        self.directory_mode.currentIndexChanged.connect(self.change_directory_view)
+        self.delete_service=DeleteService(self.store)
         self.monitor=None;self.duplicate_dialog=None;self.statistics_dialog=None;self.task_kind=''
         self.monitor_signals=MonitorSignals(self);self.monitor_signals.updated.connect(self.monitor_updated);self.monitor_signals.status.connect(self.monitor_status)
         self.monitor_label=QLabel('空闲 · 自动监控未开启');self.monitor_label.setMaximumWidth(480);self.monitor_label.setTextFormat(Qt.TextFormat.PlainText);self.statusBar().addPermanentWidget(self.monitor_label)
@@ -120,6 +132,7 @@ class Window(QMainWindow):
         except Exception as e: QMessageBox.warning(self,'无法添加',str(e))
 
     def rebuild_tree(self):
+        if not self.confirm_pending():return
         self.tree.blockSignals(True); self.tree.clear()
         def item(parent,title,data):
             i=QTreeWidgetItem(parent,[title]); i.setData(0,Qt.ItemDataRole.UserRole,data); return i
@@ -133,16 +146,74 @@ class Window(QMainWindow):
         tag_root=item(self.tree,'我的标签（双击管理）',{'tags_view':True})
         for tag,count in sorted(self.store.tags().items()):item(tag_root,f'{tag} ({count:,})',{'tag':tag,'exact_tag':True})
         item(self.tree,'已不存在的文件',{'missing':True})
-        raw=item(self.tree,'微信原始目录（双击可设置别名）',{'raw':True}); self.directory_data={}
+        chinese=self.directory_mode.currentIndex()==0
+        raw=item(self.tree,'微信账号（中文分类）' if chinese else '微信原始目录（双击可备注）',{'raw':True});self.raw_directory_root=raw; self.directory_data={}
         selected=self.account.currentData()
         for a in self.store.accounts():
             if selected and selected!=a['path']:continue
-            root_item=item(raw,a['name'],{'directory':a['path'],'account_edit':True}); nodes={a['path']:root_item}
+            label=a['name'] if chinese else Path(a['path']).name+('（'+a['name']+'）' if a['name']!=Path(a['path']).name else '')
+            root_item=item(raw,label,{'directory':a['path'],'account_edit':True,'account':a['path'],'loaded':chinese})
             root_item.setToolTip(0,a['path'])
             info=self.store.directory_info(a['path'])
             if info:self.directory_data[a['path']]=info
-            QTreeWidgetItem(root_item,['展开以加载目录…'])
+            if chinese:
+                for label,paths in virtual_sections(a['path']):
+                    paths=[canonical(p) for p in paths]
+                    section=item(root_item,label,{'directories':paths,'account':a['path'],'virtual_label':label})
+                    if not paths and label.startswith('其他'):
+                        section.setData(0,Qt.ItemDataRole.UserRole,{'directory':a['path'],'account':a['path'],'virtual_other':True});QTreeWidgetItem(section,['展开查看原始目录…'])
+                    for path in paths:
+                        data=self.store.directory_info(path);alias=data['alias'] if data else ''
+                        mapped=describe_directory(path,a['path'],alias)
+                        child=item(section,mapped['name'],{'directory':path,'account':a['path'],'label':mapped['name']});child.setToolTip(0,path);child.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+            else:QTreeWidgetItem(root_item,['展开以加载目录…'])
         raw.setExpanded(True); self.tree.setCurrentItem(all_item); self.nav={}; self.tree.blockSignals(False); self.reload()
+
+    def change_directory_view(self,index):
+        previous=self.store.setting('directory:viewmode',0)
+        if not self.confirm_pending():
+            self.directory_mode.blockSignals(True);self.directory_mode.setCurrentIndex(previous);self.directory_mode.blockSignals(False);return
+        self.store.set_setting('directory:viewmode',index);self.rebuild_tree()
+
+    def show_directory_details(self,path,account):
+        d=self.store.directory_details(path,account);self.active_directory=d;self.detail_stack.setCurrentIndex(1)
+        scanned=datetime.fromtimestamp(d['scanned_at']).strftime('%Y-%m-%d %H:%M:%S') if d['scanned_at'] else '尚无成功扫描'
+        quantity='未扫描' if d['count'] is None else f'{d["count"]:,} 个文件 / {human(d["size"])}'
+        self.dir_text.setPlainText(f'中文显示名称：{d["name"]}\n原始名称：{d["original"]}\n识别状态：'+('已识别（按账号相对路径规则）' if d['known'] else '用途尚未确认')+f'\n\n{d["description"]}\n\n真实路径：\n{d["path"]}\n\n{quantity}\n最近成功扫描：{scanned}\n当前扫描状态：'+('完整' if d['complete'] else '未完成 / 有异常，请刷新后核对')+'\n\n备注：\n'+d['note'])
+
+    def open_actual_directory(self):
+        if not self.active_directory:return
+        path=self.active_directory['path']
+        if not Path(path).is_dir():QMessageBox.warning(self,'目录不可用','目录已不存在或无法访问。');return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def edit_active_directory(self):
+        d=self.active_directory
+        if d is None:return
+        name,ok=QInputDialog.getText(self,'显示名称','仅在本程序内使用',text=d['name'])
+        if not ok:return
+        note,ok=QInputDialog.getMultiLineText(self,'目录备注','不改变微信原始目录',d['note'])
+        if not ok:return
+        if canonical(d['path'])==d['account']:self.store.rename(d['account'],name.strip() or d['original'],note);self.update_accounts()
+        else:self.store.set_directory_meta(d['path'],name.strip(),note)
+        self.rebuild_tree();self.nav={'directory':d['path'],'account':d['account']};self.reload()
+
+    def jump_to_directory(self):
+        if not self.active or not self.confirm_pending():return
+        target=Path(self.active['path']).parent;account=self.active['account']
+        self.directory_mode.setCurrentIndex(1)
+        root=next((self.raw_directory_root.child(i) for i in range(self.raw_directory_root.childCount()) if (self.raw_directory_root.child(i).data(0,Qt.ItemDataRole.UserRole) or {}).get('directory')==account),None)
+        if root is None:return
+        current=root;path=Path(account)
+        for part in target.relative_to(path).parts:
+            self.expand_directory(current);current.setExpanded(True);path/=part;key=canonical(path)
+            child=next((current.child(i) for i in range(current.childCount()) if (current.child(i).data(0,Qt.ItemDataRole.UserRole) or {}).get('directory')==key),None)
+            if child is None:
+                info=self.store.directory_info(key)
+                if info is None:return
+                child=QTreeWidgetItem(current,[Path(key).name]);child.setData(0,Qt.ItemDataRole.UserRole,{'directory':key,'account':account});child.setToolTip(0,key);child.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+            current=child
+        self.tree.setCurrentItem(current);self.tree.scrollToItem(current)
 
     def nav_changed(self):
         items=self.tree.selectedItems(); self.nav=items[0].data(0,Qt.ItemDataRole.UserRole) if items else {}
@@ -170,10 +241,9 @@ class Window(QMainWindow):
         children=self.store.directory_children(path,offset=offset)
         for d in children:
             self.directory_data[d['path']]=d;p=Path(d['path'])
-            label=d['alias'] or LABELS.get(p.name,p.name)
-            if not d['alias'] and len(p.name)==7 and p.name[4]=='-':label=p.name[:4]+'年'+p.name[5:]+'月'
+            label=describe_directory(d['path'],d['account'],d['alias'])['name'] if self.directory_mode.currentIndex()==0 else p.name+('（'+d['alias']+'）' if d['alias'] else '')
             node=QTreeWidgetItem(item,[f'{label} ({d["count"]:,})'])
-            node.setData(0,Qt.ItemDataRole.UserRole,{'directory':d['path'],'label':label})
+            node.setData(0,Qt.ItemDataRole.UserRole,{'directory':d['path'],'account':d['account'],'label':d['alias'] or p.name})
             node.setToolTip(0,f'{d["path"]}\n{d["count"]:,} 个文件 / {human(d["size"])}')
             node.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
         if len(children)==200:
@@ -193,7 +263,11 @@ class Window(QMainWindow):
             note,ok=QInputDialog.getMultiLineText(self,'账号备注','备注',a['note'])
             if not ok:return
             self.store.rename(path,name.strip(),note); self.update_accounts()
-        else:self.store.alias(path,name.strip())
+        else:
+            old=self.store.directory_info(path)
+            note,ok=QInputDialog.getMultiLineText(self,'目录备注','只保存在本程序中',old.get('note','') if old else '')
+            if not ok:return
+            self.store.set_directory_meta(path,name.strip(),note)
         self.rebuild_tree()
 
     def reload(self,*args,preserve=False):
@@ -210,6 +284,8 @@ class Window(QMainWindow):
         if self.maximum.value() and self.maximum.value()<self.minimum.value():
             self.statusBar().showMessage('大小上限不能小于下限。');return
         filters=dict(query=self.query.text().strip(),category=self.nav.get('category') or (self.category.currentText() if self.category.currentIndex()>0 else ''),account=self.account.currentData() or '',favorite=self.nav.get('favorite',False),tag=self.nav.get('tag') or self.tag_filter.text().strip(),exact_tag=self.nav.get('exact_tag',False),minimum=int(self.minimum.value()*1024**2),maximum=int(self.maximum.value()*1024**2) if self.maximum.value() else None,start=self.start.text().strip(),end=self.end.text().strip(),directory=self.nav.get('directory',''),missing=self.nav.get('missing',False))
+        if 'directories' in self.nav:filters['directories']=self.nav['directories']
+        if self.nav.get('account'):filters['account']=self.nav['account']
         if self.nav.get('recent'):
             from datetime import timedelta
             filters['start']=(datetime.now()-timedelta(days=7)).strftime('%Y-%m-%d')
@@ -222,6 +298,12 @@ class Window(QMainWindow):
         if d:text+=f' | 原目录含内部数据：{d["count"]:,} 个文件 / {human(d["size"])}'
         self.statusBar().showMessage(text)
         if not rows:self.info.setText('没有匹配的文件。请调整筛选条件，或添加微信目录并刷新索引。')
+        self.active_directory=None;self.detail_stack.setCurrentIndex(0)
+        if self.nav.get('directory'):
+            directory=self.store.directory_info(self.nav['directory']);account=self.nav.get('account') or (directory['account'] if directory else None)
+            if account:self.show_directory_details(self.nav['directory'],account)
+        elif self.nav.get('virtual_label'):
+            self.dir_text.setPlainText(self.nav['virtual_label']+'\n这是虚拟分类，不创建磁盘文件夹。\n已发现路径：\n'+('\n'.join(self.nav.get('directories',[])) or '当前未发现 / 尚未扫描，不代表微信中不存在该类资源。'));self.detail_stack.setCurrentIndex(1)
         if selected_paths:
             index=next((i for i,r in enumerate(self.model.rows) if r['path'] in selected_paths),None)
             if index is not None:self.table.selectRow(index)
@@ -241,7 +323,7 @@ class Window(QMainWindow):
             return
         selected=self.selected(); self.statusBar().showMessage(f'当前 {len(self.model.rows):,} 个文件 · 选中 {len(selected)} 个 · {human(sum(r["size"] for r in selected))}')
         if not selected:return
-        r=selected[0]; self.active=r; self.info.setText(f'{r["name"]}\n{r["category"]} · {human(r["size"])}\n账号：{r["account_name"]}'+('\n文件已不存在' if r['missing'] else '')); self.path.setPlainText(r['path']); self.note.setPlainText(r['note']); self.tags.setText(r['tags']); self.favorite.setChecked(bool(r['favorite'])); self.preview.clear()
+        r=selected[0]; self.active=r;self.active_directory=None;self.detail_stack.setCurrentIndex(0); self.info.setText(f'{r["name"]}\n{r["category"]} · {human(r["size"])}\n账号：{r["account_name"]}'+('\n文件已不存在' if r['missing'] else '')); self.path.setPlainText(r['path']); self.note.setPlainText(r['note']); self.tags.setText(r['tags']); self.favorite.setChecked(bool(r['favorite'])); self.preview.clear()
         self.preview_controller.clear();self.preview_image=None
         if r['category']=='图片' and not r['missing']:
             self.preview.setText('正在生成预览…');self.preview_controller.request(r['path'],r['size'])
@@ -316,7 +398,7 @@ class Window(QMainWindow):
             else:QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.active['path']).parent)))
 
     def context_menu(self,pos):
-        m=QMenu(self); m.addAction('打开文件',self.open_file); m.addAction('打开所在文件夹',self.reveal); m.addAction('复制路径',lambda:QApplication.clipboard().setText(self.path.toPlainText())); m.addAction('复制 / 导出所选',self.export); m.addAction('批量添加标签',self.batch_tags);m.addAction('批量管理所选',lambda:self.bulk_dialog(False));m.addAction('批量管理当前筛选结果',lambda:self.bulk_dialog(True)); m.exec(self.table.viewport().mapToGlobal(pos))
+        m=QMenu(self); m.addAction('打开文件',self.open_file); m.addAction('打开所在文件夹',self.reveal);m.addAction('在真实目录视图定位',self.jump_to_directory); m.addAction('复制路径',lambda:QApplication.clipboard().setText(self.path.toPlainText())); m.addAction('复制 / 导出所选',self.export); m.addAction('批量添加标签',self.batch_tags);m.addAction('批量管理所选',lambda:self.bulk_dialog(False));m.addAction('批量管理当前筛选结果',lambda:self.bulk_dialog(True));m.addSeparator();m.addAction('移入回收站（仅所选文件）',lambda:self.delete_paths([r['path'] for r in self.selected()])); m.exec(self.table.viewport().mapToGlobal(pos))
 
     def start_worker(self,fn,done,scan=False):
         if self.worker and self.worker.isRunning():QMessageBox.information(self,'任务运行中','请等待当前任务完成。'); return
@@ -369,7 +451,7 @@ class Window(QMainWindow):
 
     def settings(self):
         if not self.confirm_pending():return
-        action,ok=QInputDialog.getItem(self,'设置与数据','选择操作',['备份索引、备注和收藏','恢复备份','开启/关闭自动监控','重新启动自动监控','查看本地数据位置','关于与许可证'],0,False)
+        action,ok=QInputDialog.getItem(self,'设置与数据','选择操作',['备份索引、备注和收藏','恢复备份','开启/关闭自动监控','重新启动自动监控','删除记录（仅本机）','打开 Windows 回收站','查看本地数据位置','关于与许可证'],0,False)
         if not ok:return
         if action.startswith('备份'):
             target,_=QFileDialog.getSaveFileName(self,'备份数据','微信文件管理器备份.sqlite','SQLite (*.sqlite)')
@@ -383,6 +465,11 @@ class Window(QMainWindow):
             if enabled:self.start_monitor()
             elif self.monitor:self.monitor.stop()
         elif action=='重新启动自动监控':self.store.set_setting('monitor:enabled',True);self.restart_monitor()
+        elif action=='删除记录（仅本机）':DeleteHistoryDialog(self.delete_service,self).exec()
+        elif action=='打开 Windows 回收站':
+            import subprocess
+            if sys.platform=='win32':subprocess.Popen(['explorer.exe','shell:RecycleBinFolder'])
+            else:QMessageBox.information(self,'不支持','仅支持 Windows 回收站。')
         elif action.startswith('查看'):QMessageBox.information(self,'本地数据',str(self.store.path))
         else:QMessageBox.information(self,'关于','微信文件管理器 '+__version__+'\n目录识别和月份分类参考 oracis/wechat-file-organizer-gui (MIT)。\n本软件独立于微信，不解密聊天记录。\n开源许可见程序目录 licenses 文件夹。')
 
@@ -425,6 +512,7 @@ class Window(QMainWindow):
         if self.duplicate_dialog is None:
             self.duplicate_dialog=DuplicatesDialog(self.store,self.run_duplicates,self.cancel_duplicates,self)
             self.duplicate_dialog.copyRequested.connect(self.export_rows)
+            self.duplicate_dialog.recycleRequested.connect(lambda rows:self.delete_paths([r['path'] for r in rows],True))
         else:self.duplicate_dialog.refresh()
         self.duplicate_dialog.show();self.duplicate_dialog.raise_()
 
@@ -492,6 +580,66 @@ class Window(QMainWindow):
         if 'error' in out:QMessageBox.warning(self,'批量操作失败',out['error']);return
         r=out['result'];self.reload(preserve=True);self.refresh_tag_nodes()
         QMessageBox.information(self,'批量操作结果',f'成功 {r["success"]:,}；实际变更 {r["changed"]:,}；失败 {len(r["failures"])}'+('\n已取消，未提交变更' if r['cancelled'] else '')+'\n'+'\n'.join(r['failures'][:10]))
+
+    def delete_paths(self,paths,duplicate=False):
+        if not paths:QMessageBox.information(self,'选择文件','请主动选择需要处理的文件。');return
+        if not self.confirm_pending():return
+        if self.worker and self.worker.isRunning():QMessageBox.information(self,'任务运行中','请等待当前任务完成再准备删除。');return
+        self.task_kind='delete_prepare'
+        self.start_worker(lambda progress:self.delete_service.prepare(paths,duplicate,lambda:QThread.currentThread().isInterruptionRequested(),progress),self.delete_prepared,True)
+
+    def delete_prepared(self,out):
+        if self.worker and self.worker.isRunning():QTimer.singleShot(10,lambda:self.delete_prepared(out));return
+        if 'error' in out:QMessageBox.warning(self,'未开始删除',out['error']);return
+        plan=out['result'];dialog=DeleteDialog(plan,self)
+        if dialog.exec()!=QDialog.DialogCode.Accepted:
+            self.delete_service.execute(plan,confirmed=False);self.statusBar().showMessage('已取消，没有删除文件。');return
+        self.task_kind='delete'
+        self.start_worker(lambda progress:self.delete_service.execute(plan,True,dialog.original_ack.isChecked(),lambda:QThread.currentThread().isInterruptionRequested(),progress),self.delete_done,True)
+
+    def delete_done(self,out):
+        if 'error' in out:QMessageBox.warning(self,'处理异常','请核对删除记录与回收站：\n'+out['error']);return
+        r=out['result'];self.reload(preserve=True)
+        self.refresh_deleted_counts([row['path'] for row in r['items'] if row['result'] in {'success','uncertain'}])
+        if self.duplicate_dialog:self.duplicate_dialog.refresh()
+        if self.statistics_dialog:self.statistics_dialog.refresh()
+        report=QDialog(self);report.setWindowTitle('回收站处理结果');report.resize(1100,600);layout=QVBoxLayout(report)
+        summary=QLabel(f'已确认移入回收站 {r["success"]}；失败 {r["failed"]}；跳过 {r["skipped"]}；取消 {r["cancelled"]}；待核对 {r["uncertain"]}。\n回收站接收容量 {human(r["recycled_bytes"])}，不表示磁盘已释放。显示前 500 条；完整逐项记录可从“设置与备份 → 删除记录”查看。');summary.setWordWrap(True);layout.addWidget(summary)
+        table=QTreeWidget();table.setHeaderLabels(['原始路径','结果','原因']);layout.addWidget(table)
+        for row in r['items'][:500]:QTreeWidgetItem(table,[row['path'],RESULT_LABELS.get(row['result'],row['result']),row['reason']])
+        close=QPushButton('关闭');close.clicked.connect(report.accept);layout.addWidget(close);report.exec()
+
+    def refresh_deleted_counts(self,paths):
+        from PySide6.QtWidgets import QTreeWidgetItemIterator
+        names={a['path']:a['name'] for a in self.store.accounts()};accounts=[Path(path) for path in names];parents=set()
+        for path in paths:
+            p=Path(path)
+            root=next((root for root in accounts if p.is_relative_to(root)),None)
+            if root is None:continue
+            for parent in p.parents:
+                if not parent.is_relative_to(root):break
+                parents.add(canonical(parent))
+        info={};ordered=list(parents)
+        with self.store.connect() as db:
+            for start in range(0,len(ordered),200):
+                part=ordered[start:start+200]
+                info.update({row['path']:dict(row) for row in db.execute('SELECT * FROM directories WHERE path IN ('+','.join('?' for _ in part)+')',part)})
+        counts=self.store.category_counts(self.account.currentData() or '')
+        iterator=QTreeWidgetItemIterator(self.tree)
+        while iterator.value():
+            item=iterator.value();data=item.data(0,Qt.ItemDataRole.UserRole) or {};path=data.get('directory')
+            if path in info:
+                d=info[path];self.directory_data[path]=d
+                if data.get('virtual_other'):label='其他数据 / 全部原始目录'
+                elif data.get('account_edit'):
+                    name=names.get(path,Path(path).name)
+                    label=name if self.directory_mode.currentIndex()==0 else Path(path).name+('（'+name+'）' if name!=Path(path).name else '')
+                elif self.directory_mode.currentIndex()==0:label=describe_directory(path,d['account'],d['alias'])['name']
+                else:label=Path(path).name+('（'+d['alias']+'）' if d['alias'] else '')
+                item.setText(0,f'{label} ({d["count"]:,})')
+            elif data.get('category'):item.setText(0,f'{data["category"]} ({counts.get(data["category"],{}).get("count",0):,})')
+            elif not data and item.text(0).startswith('全部文件'):item.setText(0,f'全部文件 ({sum(c["count"] for c in counts.values()):,})')
+            iterator+=1
 
     def closeEvent(self,event):
         if self.worker and self.worker.isRunning():

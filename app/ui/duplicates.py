@@ -21,8 +21,9 @@ def open_path(path,parent):
 
 class DuplicatesDialog(QDialog):
     copyRequested=Signal(list)
+    recycleRequested=Signal(list)
     def __init__(self,store,detect,cancel,parent=None):
-        super().__init__(parent);self.store=store;self.setWindowTitle('重复文件 · 只检测，不清理');self.resize(1120,760);self.group_rows=[]
+        super().__init__(parent);self.store=store;self.setWindowTitle('重复文件 · 手动选择后移入回收站');self.resize(1120,760);self.group_rows=[]
         layout=QVBoxLayout(self);self.summary=QLabel();self.summary.setWordWrap(True);layout.addWidget(self.summary)
         actions=QHBoxLayout();layout.addLayout(actions)
         for label,callback in [('开始检测',detect),('取消检测',cancel),('刷新结果',self.refresh)]:
@@ -31,11 +32,12 @@ class DuplicatesDialog(QDialog):
         self.cross=QCheckBox('只看跨账号重复');actions.addWidget(self.cross)
         self.groups=QTreeWidget();self.groups.setHeaderLabels(['SHA-256 组','单份大小','份数','账号数','总大小','理论冗余']);layout.addWidget(self.groups,1)
         more=QPushButton('加载更多重复组');more.clicked.connect(self.load_groups);layout.addWidget(more)
-        self.model=FilesModel();self.members=QTableView();self.members.setModel(self.model);self.members.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows);self.members.setSelectionMode(QTableView.SelectionMode.ExtendedSelection);self.members.setColumnWidth(0,350);layout.addWidget(self.members,1)
+        self.model=FilesModel();self.model.checkable=True;self.members=QTableView();self.members.setModel(self.model);self.members.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows);self.members.setSelectionMode(QTableView.SelectionMode.ExtendedSelection);self.members.setColumnWidth(0,350);layout.addWidget(self.members,1)
         self.path=QLabel('选择文件查看原始路径');self.path.setWordWrap(True);self.path.setTextFormat(Qt.TextFormat.PlainText);self.path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse);layout.addWidget(self.path)
         buttons=QHBoxLayout();layout.addLayout(buttons)
         for label,callback in [('更多组内文件',self.load_members),('打开文件',self.open_selected),('定位文件',self.locate_selected),('复制路径',self.copy_path),('复制归档所选',self.copy_selected)]:
             b=QPushButton(label);b.clicked.connect(callback);buttons.addWidget(b)
+        recycle=QPushButton('移入回收站（仅手动勾选项）');recycle.clicked.connect(lambda:self.recycleRequested.emit(self.model.checked_rows()) if self.model.checked_rows() else QMessageBox.information(self,'手动勾选','请在文件名旁明确勾选需要处理的文件，不会自动选择重复项。'));buttons.addWidget(recycle)
         self.groups.itemSelectionChanged.connect(self.group_changed);self.members.selectionModel().selectionChanged.connect(self.member_changed);self.members.doubleClicked.connect(self.open_selected)
         self.order.currentIndexChanged.connect(self.refresh);self.cross.toggled.connect(self.refresh);self.refresh()
 
@@ -43,7 +45,7 @@ class DuplicatesDialog(QDialog):
         s=self.store.duplicate_summary();state=s['state'];self.groups.clear();self.group_rows=[];self.model.replace([])
         stamp=datetime.fromtimestamp(state['time']).strftime('%Y-%m-%d %H:%M:%S') if state.get('time') else '尚未检测'
         status='检测中' if state.get('running') else '当前索引的候选检测完整' if state.get('complete') else '未完成检测 / 有跳过项'
-        self.summary.setText(f'已确认 {s["groups"]:,} 组、{s["files"]:,} 个文件；理论冗余 {human(s["redundant"])}。{status}；{stamp}。\n理论冗余不是实际可释放空间（硬链接、压缩等会影响磁盘占用）；本程序不删除源文件。结果基于最近扫描和校验，外部变更后需刷新。')
+        self.summary.setText(f'已确认 {s["groups"]:,} 组、{s["files"]:,} 个文件；理论冗余 {human(s["redundant"])}。{status}；{stamp}。\n理论冗余不是已释放空间。微信原始附件可能分别被不同聊天引用，必须手动勾选并额外确认风险，执行前重新校验哈希；不自动选择或永久删除。')
         if not self.store.setting('state:scan',{}).get('complete'):self.summary.setText(self.summary.text()+'\n完整扫描尚未成功或存在访问异常，当前结果不能代表全部微信文件。')
         self.load_groups()
 

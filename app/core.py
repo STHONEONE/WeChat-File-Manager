@@ -60,5 +60,25 @@ class Store(DuplicateMixin, AnnotationMixin, SearchMixin, ScannerMixin, Database
         self.rename(path,value)
         with self.connect() as db: db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',('alias:'+path,value))
 
+    def directory_details(self,path,account):
+        from app.directory_mapper import describe_directory
+        info=self.directory_info(path)
+        a=next((a for a in self.accounts() if a['path']==account),None)
+        if a is None:raise ValueError('账号已不存在')
+        alias=a['name'] if canonical(path)==account else info['alias'] if info else ''
+        details=describe_directory(path,account,alias)
+        details.update(count=info['count'] if info else None,size=info['size'] if info else None,note=(a['note'] if canonical(path)==account else info.get('note','') if info else ''),account=account)
+        with self.connect() as db:state=db.execute('SELECT * FROM account_scan_state WHERE account=?',(account,)).fetchone()
+        details['scanned_at']=state['last_success'] if state else None;details['complete']=bool(state and state['complete'])
+        return details
+
+    def set_directory_meta(self,path,alias,note):
+        path=canonical(path)
+        with self.connect() as db:
+            if not db.execute('SELECT 1 FROM directories WHERE path=?',(path,)).fetchone():raise ValueError('目录尚未进入索引，请先扫描')
+            db.execute('UPDATE directories SET alias=?,note=? WHERE path=?',(alias,note,path))
+            db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',('alias:'+path,alias))
+            db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',('dirnote:'+path,note))
+
 
 from app.file_service import digest, export_files

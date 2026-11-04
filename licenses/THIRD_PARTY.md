@@ -1,5 +1,7 @@
 # Third-party notices
 
+pywin32 312: Windows Shell/COM and file-sharing handles, copyright Mark Hammond, Greg Stein and contributors. See pywin32-COM-LICENSE.txt and pywin32-Win32-LICENSE.txt. https://github.com/mhammond/pywin32 . This project implements its own recycle-required adapter without a legacy deletion fallback.
+
 watchdog 7.0.0: Copyright watchdog contributors; Apache License 2.0. Native Windows directory event observer. See watchdog-LICENSE.txt and https://github.com/gorakhargosh/watchdog . This application uses its public API; no credential or content upload is involved.
 
 Directory recognition and month classification adapted from oracis/wechat-file-organizer-gui, commit d107d282efdbf7d56fc0d424d541f128c534c037, MIT, Copyright (c) 2026 oracis. See oracis-MIT.txt.
