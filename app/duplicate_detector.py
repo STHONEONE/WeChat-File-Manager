@@ -68,7 +68,9 @@ class DuplicateMixin:
     def duplicate_groups(self,order='redundant',cross_account=False,limit=200,offset=0):
         if order not in {'redundant','count','total'}:raise ValueError('未知重复组排序')
         if not 1<=limit<=1000 or offset<0:raise ValueError('分页范围无效')
-        sql='''SELECT h.sha256,f.size,count(*) AS count,count(DISTINCT f.account) AS accounts,
+        sql='''SELECT h.sha256,f.size,min(f.name) AS sample_name,
+               min((SELECT a.name FROM accounts a WHERE a.path=f.account)) AS sample_account,
+               count(*) AS count,count(DISTINCT f.account) AS accounts,
                f.size*count(*) AS total,f.size*(count(*)-1) AS redundant,min(h.verified_at) AS verified_at'''+VALID_JOIN+''' GROUP BY h.sha256,f.size HAVING count(*)>1'''
         if cross_account:sql+=' AND count(DISTINCT f.account)>1'
         sql+=' ORDER BY '+('count' if order=='count' else 'total' if order=='total' else 'redundant')+' DESC,h.sha256 LIMIT ? OFFSET ?'
