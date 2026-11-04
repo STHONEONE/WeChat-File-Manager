@@ -8,6 +8,34 @@ def checked_tag(name):
     return name
 
 class AnnotationMixin:
+    def bulk_manage(self,operation,tags='',paths=None,filters=None,cancelled=lambda:False):
+        if operation not in {'add_tags','remove_tags','favorite','unfavorite'}:raise ValueError('不支持的批量操作')
+        names=[checked_tag(t) for t in tags_from(tags)]
+        if operation in {'add_tags','remove_tags'} and not names:raise ValueError('请指定至少一个标签')
+        class Cancelled(Exception):pass
+        result={'success':0,'changed':0,'failures':[],'cancelled':False}
+        try:
+            with self.connect() as db:
+                if paths is None:
+                    where,args=self._where(**(filters or {}))
+                    paths=[r[0] for r in db.execute('SELECT f.path FROM files f JOIN accounts a ON a.path=f.account WHERE '+where,args)]
+                if operation=='add_tags':db.executemany('INSERT OR IGNORE INTO tag_catalog(name) VALUES (?)',[(t,) for t in names])
+                for path in dict.fromkeys(paths):
+                    if cancelled():raise Cancelled()
+                    row=db.execute('SELECT tags,favorite FROM files WHERE path=?',(path,)).fetchone()
+                    if row is None:result['failures'].append(path+'：文件不在索引中');continue
+                    if operation in {'add_tags','remove_tags'}:
+                        old=tags_from(row['tags'])
+                        new=list(dict.fromkeys(old+names)) if operation=='add_tags' else [t for t in old if t not in names]
+                        value=', '.join(new)
+                        if value!=row['tags']:db.execute('UPDATE files SET tags=? WHERE path=?',(value,path));result['changed']+=1
+                    else:
+                        value=int(operation=='favorite')
+                        if value!=row['favorite']:db.execute('UPDATE files SET favorite=? WHERE path=?',(value,path));result['changed']+=1
+                    result['success']+=1
+        except Cancelled:return dict(success=0,changed=0,failures=[],cancelled=True)
+        return result
+
     def annotate(self,path,note,tags,favorite):
         names=tags_from(tags)
         with self.connect() as db:

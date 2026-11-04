@@ -1,0 +1,72 @@
+{
+  "hardware": {
+    "os": "Windows-11-10.0.26300-SP0",
+    "python": "3.13.7",
+    "logical_processors": 18,
+    "processor": "Intel(R) Core(TM) Ultra 5 125H",
+    "ram_gib": 31.6
+  },
+  "scan_dataset": "2000 synthetic 4-byte files, same physical directory for both versions",
+  "baseline_commit": "26756e7ff1bc6693248dd7c0cf7cdd5d66d7f0d9",
+  "versions": {
+    "v1.1": {
+      "first_scan_seconds": 0.7967,
+      "unchanged_scan_seconds": 0.7302,
+      "unchanged_file_write_statements": 2001,
+      "query_50000": {
+        "first": {
+          "median_ms": 17.393,
+          "max_ms": 26.585
+        },
+        "chinese": {
+          "median_ms": 33.626,
+          "max_ms": 36.503
+        },
+        "last": {
+          "median_ms": 37.469,
+          "max_ms": 38.992
+        }
+      }
+    },
+    "v1.2": {
+      "first_scan_seconds": 0.7295,
+      "unchanged_scan_seconds": 0.676,
+      "unchanged_file_write_statements": 0,
+      "query_50000": {
+        "first": {
+          "median_ms": 17.192,
+          "max_ms": 19.197
+        },
+        "chinese": {
+          "median_ms": 33.236,
+          "max_ms": 34.266
+        },
+        "last": {
+          "median_ms": 36.396,
+          "max_ms": 37.322
+        }
+      }
+    }
+  },
+  "duplicates": {
+    "dataset": "44 synthetic files: 20 identical pairs, 2 empty files, 2 x 4 MiB files",
+    "first_seconds": 0.576,
+    "repeat_seconds": 0.1742,
+    "first_hashed": 44,
+    "repeat_hashed": 0,
+    "cache_hit_rate": 1.0
+  },
+  "monitor": {
+    "debounce_seconds": 0.2,
+    "native_update_ms": [
+      1272.816,
+      1089.332,
+      1145.495
+    ]
+  },
+  "notes": [
+    "No source contents or private paths in this report.",
+    "File write counts measured in a separate traced scan; timings measured without tracing.",
+    "Full traversal is still required; OS disk cache can affect comparison."
+  ]
+}

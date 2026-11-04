@@ -18,8 +18,19 @@ from app.search import SearchMixin
 from app.scanner import ScannerMixin
 
 from app.annotations import AnnotationMixin
+from app.duplicate_detector import DuplicateMixin
 
-class Store(AnnotationMixin, SearchMixin, ScannerMixin, Database):
+class Store(DuplicateMixin, AnnotationMixin, SearchMixin, ScannerMixin, Database):
+    def setting(self,key,default=None):
+        import json
+        with self.connect() as db:row=db.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
+        if row is None:return default
+        try:return json.loads(row[0])
+        except (ValueError,TypeError):return default
+
+    def set_setting(self,key,value):
+        import json
+        with self.connect() as db:db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',(key,json.dumps(value,ensure_ascii=False)))
     def accounts(self):
         with self.connect() as db: return [dict(r) for r in db.execute('SELECT * FROM accounts ORDER BY name')]
 

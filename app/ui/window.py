@@ -4,7 +4,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QIdentityProxyModel, QTimer, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QIdentityProxyModel, QTimer, QUrl,QObject
 from PySide6.QtGui import QDesktopServices, QImageReader, QPixmap, QIcon, QPainter, QColor, QFontDatabase, QFont
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLineEdit,QComboBox,QPushButton,QSplitter,QTreeWidget,QTreeWidgetItem,QTableView,QLabel,QTextEdit,QCheckBox,QFormLayout,QFileDialog,QMessageBox,QInputDialog,QMenu,QDoubleSpinBox,QDialog,QDialogButtonBox,QProgressBar)
 from app.core import Store, CATEGORIES, LABELS, candidates, canonical, human, export_files
@@ -22,6 +22,13 @@ class Worker(QThread):
 from app.ui.file_model import FilesModel
 from app.ui.dialogs import DateFilter,TagDialog
 from app.ui.preview import PreviewController
+from app.ui.duplicates import DuplicatesDialog
+from app.ui.statistics_view import StatisticsDialog
+from app.file_monitor import FileMonitor
+
+class MonitorSignals(QObject):
+    updated=Signal(object)
+    status=Signal(str)
 
 class Window(QMainWindow):
     def __init__(self,store, auto=True):
@@ -79,6 +86,9 @@ class Window(QMainWindow):
         self.category.currentIndexChanged.connect(self.reload); self.account.currentIndexChanged.connect(self.rebuild_tree)
         self.model.sortRequested.connect(self.sort_changed)
         self.tree.itemExpanded.connect(self.expand_directory)
+        self.monitor=None;self.duplicate_dialog=None;self.statistics_dialog=None;self.task_kind=''
+        self.monitor_signals=MonitorSignals(self);self.monitor_signals.updated.connect(self.monitor_updated);self.monitor_signals.status.connect(self.monitor_status)
+        self.monitor_label=QLabel('空闲 · 自动监控未开启');self.monitor_label.setMaximumWidth(480);self.monitor_label.setTextFormat(Qt.TextFormat.PlainText);self.statusBar().addPermanentWidget(self.monitor_label)
         self.update_accounts(); self.rebuild_tree()
         if auto: QTimer.singleShot(500,self.startup)
 
@@ -91,7 +101,9 @@ class Window(QMainWindow):
                 try: self.store.add(root)
                 except ValueError: pass
             self.update_accounts()
-        if self.store.accounts(): self.scan()
+        if self.store.accounts():
+            if self.store.setting('monitor:enabled',False):self.start_monitor()
+            else:self.scan()
         else:self.progress_label.setText('首次使用：点击“添加微信目录”选择微信文件夹；索引和备注保存在本地，微信原文件保持原样。')
 
     def update_accounts(self):
@@ -113,6 +125,9 @@ class Window(QMainWindow):
             i=QTreeWidgetItem(parent,[title]); i.setData(0,Qt.ItemDataRole.UserRole,data); return i
         counts=self.store.category_counts(self.account.currentData() or '')
         all_item=item(self.tree,f'全部文件 ({sum(c["count"] for c in counts.values()):,})',{})
+        item(self.tree,'最近文件（7 天）',{'recent':True})
+        smart=item(self.tree,'智能管理',{})
+        item(smart,'重复文件',{'duplicates':True});item(smart,'大文件',{'large':True});item(smart,'存储统计',{'statistics':True});smart.setExpanded(True)
         for cat in [*CATEGORIES,'其他文件']: item(self.tree,f'{cat} ({counts.get(cat,{}).get("count",0):,})',{'category':cat})
         item(self.tree,'★ 收藏',{'favorite':True})
         tag_root=item(self.tree,'我的标签（双击管理）',{'tags_view':True})
@@ -131,6 +146,10 @@ class Window(QMainWindow):
 
     def nav_changed(self):
         items=self.tree.selectedItems(); self.nav=items[0].data(0,Qt.ItemDataRole.UserRole) if items else {}
+        self.nav=self.nav or {}
+        if self.nav.get('duplicates'):self.show_duplicates();return
+        if self.nav.get('statistics'):self.statistics();return
+        if self.nav.get('large'):self.sort_order='size';self.sort_desc=True
         self.reload()
 
     def sort_changed(self,column,order):
@@ -177,8 +196,10 @@ class Window(QMainWindow):
         else:self.store.alias(path,name.strip())
         self.rebuild_tree()
 
-    def reload(self,*args):
+    def reload(self,*args,preserve=False):
         if not self.confirm_pending(): return
+        selected_paths=[r['path'] for r in self.selected()] if preserve else []
+        scroll=self.table.verticalScrollBar().value() if preserve else 0
         for w in [self.start,self.end]:
             text=w.text().strip()
             if text:
@@ -189,6 +210,9 @@ class Window(QMainWindow):
         if self.maximum.value() and self.maximum.value()<self.minimum.value():
             self.statusBar().showMessage('大小上限不能小于下限。');return
         filters=dict(query=self.query.text().strip(),category=self.nav.get('category') or (self.category.currentText() if self.category.currentIndex()>0 else ''),account=self.account.currentData() or '',favorite=self.nav.get('favorite',False),tag=self.nav.get('tag') or self.tag_filter.text().strip(),exact_tag=self.nav.get('exact_tag',False),minimum=int(self.minimum.value()*1024**2),maximum=int(self.maximum.value()*1024**2) if self.maximum.value() else None,start=self.start.text().strip(),end=self.end.text().strip(),directory=self.nav.get('directory',''),missing=self.nav.get('missing',False))
+        if self.nav.get('recent'):
+            from datetime import timedelta
+            filters['start']=(datetime.now()-timedelta(days=7)).strftime('%Y-%m-%d')
         page=self.store.search_page(order=self.sort_order,descending=self.sort_desc,**filters)
         rows=page.rows
         self.preview_controller.clear();self.preview_image=None
@@ -198,6 +222,10 @@ class Window(QMainWindow):
         if d:text+=f' | 原目录含内部数据：{d["count"]:,} 个文件 / {human(d["size"])}'
         self.statusBar().showMessage(text)
         if not rows:self.info.setText('没有匹配的文件。请调整筛选条件，或添加微信目录并刷新索引。')
+        if selected_paths:
+            index=next((i for i,r in enumerate(self.model.rows) if r['path'] in selected_paths),None)
+            if index is not None:self.table.selectRow(index)
+        if preserve:self.table.verticalScrollBar().setValue(scroll)
 
     def selected(self):
         return [self.model.rows[self.proxy.mapToSource(i).row()] for i in self.table.selectionModel().selectedRows()]
@@ -288,7 +316,7 @@ class Window(QMainWindow):
             else:QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.active['path']).parent)))
 
     def context_menu(self,pos):
-        m=QMenu(self); m.addAction('打开文件',self.open_file); m.addAction('打开所在文件夹',self.reveal); m.addAction('复制路径',lambda:QApplication.clipboard().setText(self.path.toPlainText())); m.addAction('复制 / 导出所选',self.export); m.addAction('批量添加标签',self.batch_tags); m.exec(self.table.viewport().mapToGlobal(pos))
+        m=QMenu(self); m.addAction('打开文件',self.open_file); m.addAction('打开所在文件夹',self.reveal); m.addAction('复制路径',lambda:QApplication.clipboard().setText(self.path.toPlainText())); m.addAction('复制 / 导出所选',self.export); m.addAction('批量添加标签',self.batch_tags);m.addAction('批量管理所选',lambda:self.bulk_dialog(False));m.addAction('批量管理当前筛选结果',lambda:self.bulk_dialog(True)); m.exec(self.table.viewport().mapToGlobal(pos))
 
     def start_worker(self,fn,done,scan=False):
         if self.worker and self.worker.isRunning():QMessageBox.information(self,'任务运行中','请等待当前任务完成。'); return
@@ -304,25 +332,25 @@ class Window(QMainWindow):
 
     def scan(self):
         if not self.confirm_pending(): return
+        self.task_kind='scan'
         self.statusBar().showMessage('开始扫描…')
         self.start_worker(lambda progress:self.store.scan(progress,lambda:QThread.currentThread().isInterruptionRequested()),self.scan_done,True)
 
     def scan_done(self,out):
         self.rebuild_tree()
-        if 'error' in out:QMessageBox.warning(self,'扫描失败',out['error']); return
+        if 'error' in out:
+            self.store.set_setting('state:scan',{'complete':False,'running':False,'errors':[out['error']]});QMessageBox.warning(self,'扫描失败',out['error']); return
         r=out['result']; self.statusBar().showMessage(f'扫描'+('已停止' if r['cancelled'] else '完成')+f'：{r["files"]:,} 个可管理文件；{len(r["errors"])} 个访问异常')
         self.progress_label.setText(f'扫描'+('已取消' if r['cancelled'] else '完成')+f'；{r["files"]:,} 个可管理文件；{len(r["errors"])} 个访问异常')
         if r['errors']:QMessageBox.warning(self,'部分目录无法读取','已保留未能完整扫描账号的旧文件状态。\n'+'\n'.join(r['errors'][:15]))
+        if self.store.setting('monitor:enabled',False):
+            expected={a['path'] for a in self.store.accounts()}
+            if not self.monitor or set(getattr(self.monitor,'roots',[]))!=expected:self.restart_monitor()
 
     def statistics(self):
-        counts=self.store.category_counts();lines=['全账号统计（包含内部文件的总量来自目录元数据）：']
-        for a in self.store.accounts():
-            d=self.store.directory_info(a['path'])
-            if d:lines.append(f'{a["name"]}：{d["count"]:,} 个 / {human(d["size"])}')
-        lines.append(f'可管理文件：{sum(c["count"] for c in counts.values()):,} 个 / {human(sum(c["size"] for c in counts.values()))}')
-        for c in [*CATEGORIES,'其他文件']:
-            cstat=counts.get(c,{'count':0,'size':0});lines.append(f'{c}：{cstat["count"]:,} 个 / {human(cstat["size"])}')
-        QMessageBox.information(self,'文件统计','\n'.join(lines))
+        if self.statistics_dialog is None:self.statistics_dialog=StatisticsDialog(self.store,self)
+        else:self.statistics_dialog.refresh()
+        self.statistics_dialog.show();self.statistics_dialog.raise_()
 
     def tag_center(self):
         if not self.confirm_pending():return
@@ -341,7 +369,7 @@ class Window(QMainWindow):
 
     def settings(self):
         if not self.confirm_pending():return
-        action,ok=QInputDialog.getItem(self,'设置与数据','选择操作',['备份索引、备注和收藏','恢复备份','查看本地数据位置','关于与许可证'],0,False)
+        action,ok=QInputDialog.getItem(self,'设置与数据','选择操作',['备份索引、备注和收藏','恢复备份','开启/关闭自动监控','重新启动自动监控','查看本地数据位置','关于与许可证'],0,False)
         if not ok:return
         if action.startswith('备份'):
             target,_=QFileDialog.getSaveFileName(self,'备份数据','微信文件管理器备份.sqlite','SQLite (*.sqlite)')
@@ -350,11 +378,18 @@ class Window(QMainWindow):
             try:self.store.backup(target); QMessageBox.information(self,'备份完成',target)
             except Exception as e:QMessageBox.warning(self,'备份失败',str(e))
         elif action=='恢复备份': self.restore_backup()
+        elif action=='开启/关闭自动监控':
+            enabled=not self.store.setting('monitor:enabled',False);self.store.set_setting('monitor:enabled',enabled)
+            if enabled:self.start_monitor()
+            elif self.monitor:self.monitor.stop()
+        elif action=='重新启动自动监控':self.store.set_setting('monitor:enabled',True);self.restart_monitor()
         elif action.startswith('查看'):QMessageBox.information(self,'本地数据',str(self.store.path))
         else:QMessageBox.information(self,'关于','微信文件管理器 '+__version__+'\n目录识别和月份分类参考 oracis/wechat-file-organizer-gui (MIT)。\n本软件独立于微信，不解密聊天记录。\n开源许可见程序目录 licenses 文件夹。')
 
     def export(self):
-        rows=self.selected()
+        self.export_rows(self.selected())
+
+    def export_rows(self,rows):
         if not rows:QMessageBox.information(self,'选择文件','请先在列表中选择需要复制的文件。'); return
         target=QFileDialog.getExistingDirectory(self,'选择归档副本的保存目录')
         if not target:return
@@ -375,16 +410,95 @@ class Window(QMainWindow):
             QMessageBox.warning(self,'无法恢复','请使用微信原始目录以外的程序备份。');return
         if QMessageBox.question(self,'恢复备份','恢复将替换当前索引和个人设置。恢复前会自动备份当前数据，是否继续？')!=QMessageBox.StandardButton.Yes:return
         try:
+            if self.monitor and not self.monitor.stop():raise RuntimeError('监控仍在停止，请稍后再恢复')
             rollback=self.store.restore(source);self.active=None;self.update_accounts();self.rebuild_tree()
             QMessageBox.information(self,'恢复完成','恢复成功。原数据自动备份至：\n'+str(rollback))
         except Exception as e:QMessageBox.warning(self,'恢复失败',str(e))
+        finally:
+            if self.store.setting('monitor:enabled',False):self.start_monitor()
 
     def export_done(self,out):
         if 'error' in out:QMessageBox.warning(self,'导出失败',out['error']); return
         r=out['result']; QMessageBox.information(self,'复制结果',f'成功 {r["copied"]}；跳过 {r["skipped"]}；失败 {len(r["failures"])}\n清单：{r["manifest"]}\n'+'\n'.join(r['failures'][:10]))
 
+    def show_duplicates(self):
+        if self.duplicate_dialog is None:
+            self.duplicate_dialog=DuplicatesDialog(self.store,self.run_duplicates,self.cancel_duplicates,self)
+            self.duplicate_dialog.copyRequested.connect(self.export_rows)
+        else:self.duplicate_dialog.refresh()
+        self.duplicate_dialog.show();self.duplicate_dialog.raise_()
+
+    def run_duplicates(self):
+        if not self.confirm_pending():return
+        if self.worker and self.worker.isRunning():QMessageBox.information(self,'任务运行中','请等待当前扫描、检测或导出完成。');return
+        self.task_kind='duplicates'
+        self.start_worker(lambda progress:self.store.detect_duplicates(progress,lambda:QThread.currentThread().isInterruptionRequested()),self.duplicates_done,True)
+
+    def cancel_duplicates(self):
+        if self.task_kind=='duplicates' and self.worker and self.worker.isRunning():self.worker.requestInterruption()
+
+    def duplicates_done(self,out):
+        if self.duplicate_dialog:self.duplicate_dialog.refresh()
+        if 'error' in out:
+            self.store.set_setting('state:duplicates',{'complete':False,'running':False,'errors':[out['error']]});QMessageBox.warning(self,'重复检测失败',out['error']);return
+        r=out['result'];self.progress_label.setText(f'重复检测：'+('已取消' if r['cancelled'] else '已完成')+f'；计算 {r["hashed"]}，缓存 {r["cache_hits"]}，跳过 {r["skipped"]}')
+        if r['errors']:QMessageBox.warning(self,'检测有跳过项','结果不完整，可等待文件稳定后重试：\n'+'\n'.join(r['errors'][:12]))
+        if self.statistics_dialog and self.statistics_dialog.isVisible():self.statistics_dialog.refresh()
+
+    def start_monitor(self):
+        if self.monitor and self.monitor.thread and self.monitor.thread.is_alive():return
+        self.monitor=FileMonitor(self.store,self.monitor_signals.updated.emit,self.monitor_signals.status.emit)
+        self.monitor.start()
+
+    def restart_monitor(self):
+        if self.monitor and not self.monitor.stop():return
+        self.monitor=None;self.start_monitor()
+
+    def monitor_status(self,text):
+        latest=self.store.setting('scan:last_success',None)
+        stamp=datetime.fromtimestamp(latest).strftime('%H:%M:%S') if latest else '未完整扫描'
+        self.monitor_label.setText(text+' · 全量扫描 '+stamp);self.monitor_label.setToolTip(text)
+
+    def monitor_updated(self,message):
+        if message['result'].get('cancelled'):return
+        if self.is_dirty():self.statusBar().showMessage('索引已自动更新；当前有未保存修改，保存或刷新后查看新列表。');return
+        self.reload(preserve=True)
+        counts=self.store.category_counts(self.account.currentData() or '')
+        for i in range(self.tree.topLevelItemCount()):
+            item=self.tree.topLevelItem(i);data=item.data(0,Qt.ItemDataRole.UserRole) or {}
+            if data.get('category'):item.setText(0,f'{data["category"]} ({counts.get(data["category"],{}).get("count",0):,})')
+            elif not data and item.text(0).startswith('全部文件'):item.setText(0,f'全部文件 ({sum(c["count"] for c in counts.values()):,})')
+        if self.statistics_dialog and self.statistics_dialog.isVisible():self.statistics_dialog.refresh()
+        if self.duplicate_dialog and self.duplicate_dialog.isVisible():self.duplicate_dialog.refresh()
+
+    def bulk_dialog(self,filtered=False):
+        if not self.confirm_pending():return
+        rows=self.selected();count=self.model.total if filtered else len(rows)
+        if not count:QMessageBox.information(self,'批量管理','当前没有可操作的文件。');return
+        operations=['添加标签','移除标签','收藏','取消收藏']
+        label,ok=QInputDialog.getItem(self,'批量管理',f'范围：'+('全部筛选结果' if filtered else '所选文件')+f'，预计 {count:,} 个文件',operations,0,False)
+        if not ok:return
+        tags=''
+        if label in operations[:2]:
+            tags,ok=QInputDialog.getText(self,label,'标签名称（逗号分隔；仅修改程序索引）')
+            if not ok:return
+        if QMessageBox.question(self,'确认批量操作',f'{label}：预计 {count:,} 个文件。只修改本程序数据，是否继续？')!=QMessageBox.StandardButton.Yes:return
+        op=['add_tags','remove_tags','favorite','unfavorite'][operations.index(label)]
+        filters=dict(self.model.filters);paths=None if filtered else [r['path'] for r in rows]
+        self.task_kind='bulk'
+        self.start_worker(lambda progress:self.store.bulk_manage(op,tags,paths,filters,lambda:QThread.currentThread().isInterruptionRequested()),self.bulk_done,True)
+
+    def bulk_done(self,out):
+        if 'error' in out:QMessageBox.warning(self,'批量操作失败',out['error']);return
+        r=out['result'];self.reload(preserve=True);self.refresh_tag_nodes()
+        QMessageBox.information(self,'批量操作结果',f'成功 {r["success"]:,}；实际变更 {r["changed"]:,}；失败 {len(r["failures"])}'+('\n已取消，未提交变更' if r['cancelled'] else '')+'\n'+'\n'.join(r['failures'][:10]))
+
     def closeEvent(self,event):
         if self.worker and self.worker.isRunning():
             self.worker.requestInterruption(); QMessageBox.information(self,'任务仍在运行','已请求停止扫描。请等待当前扫描或复制完成后关闭。'); event.ignore()
-        elif self.confirm_pending():event.accept()
+        elif self.confirm_pending():
+            if self.monitor and not self.monitor.stop():event.ignore();return
+            if self.duplicate_dialog:self.duplicate_dialog.close()
+            if self.statistics_dialog:self.statistics_dialog.close()
+            event.accept()
         else:event.ignore()
