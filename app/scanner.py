@@ -57,4 +57,3 @@ class ScannerMixin:
                 if not failed: db.execute('UPDATE files SET missing=1 WHERE account=? AND seen<>?',(root,token))
             total+=len(records)
         return {'files':total,'errors':errors,'cancelled':False}
-

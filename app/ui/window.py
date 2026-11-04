@@ -388,4 +388,3 @@ class Window(QMainWindow):
             self.worker.requestInterruption(); QMessageBox.information(self,'任务仍在运行','已请求停止扫描。请等待当前扫描或复制完成后关闭。'); event.ignore()
         elif self.confirm_pending():event.accept()
         else:event.ignore()
-

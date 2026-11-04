@@ -50,4 +50,3 @@ def human(n):
     for unit in ('B','KiB','MiB','GiB','TiB'):
         if n < 1024 or unit == 'TiB': return f'{n:,.1f} {unit}'
         n /= 1024
-

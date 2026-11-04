@@ -39,4 +39,3 @@ class FilesModel(QAbstractTableModel):
 
     def sort(self,column,order=Qt.SortOrder.AscendingOrder):
         self.sortRequested.emit(column,order)
-
