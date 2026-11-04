@@ -19,7 +19,8 @@ class FilesModel(QAbstractTableModel):
         if role==Qt.ItemDataRole.DisplayRole:
             return [r['name'],r['category'],human(r['size']),datetime.fromtimestamp(r['mtime']).strftime('%Y-%m-%d %H:%M'),r['account_name'],r['tags'],'★' if r['favorite'] else ''][col]
         if role==Qt.ItemDataRole.ToolTipRole: return r['path']+('（已不存在）' if r['missing'] else '')
-    def replace(self,rows): self.beginResetModel(); self.rows=rows; self.endResetModel()
+    def replace(self,rows):
+        self.beginResetModel();self.rows=rows;self.total=len(rows);self.store=None;self.endResetModel()
 
     def configure(self,store,filters,order,descending,page):
         self.beginResetModel()

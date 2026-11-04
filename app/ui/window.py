@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QThread, Signal, QAbstractTableModel, QModelIndex
 from PySide6.QtGui import QDesktopServices, QImageReader, QPixmap, QIcon, QPainter, QColor, QFontDatabase, QFont
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLineEdit,QComboBox,QPushButton,QSplitter,QTreeWidget,QTreeWidgetItem,QTableView,QLabel,QTextEdit,QCheckBox,QFormLayout,QFileDialog,QMessageBox,QInputDialog,QMenu,QDoubleSpinBox,QDialog,QDialogButtonBox,QProgressBar)
 from app.core import Store, CATEGORIES, LABELS, candidates, canonical, human, export_files
+from app.version import __version__
 
 class Worker(QThread):
     progress=Signal(str)
@@ -29,7 +30,7 @@ class Window(QMainWindow):
         if font.exists(): QFontDatabase.addApplicationFont(str(font))
         self.setFont(QFont('Microsoft YaHei',10))
         self.setStyleSheet('QWidget {font-family:"Microsoft YaHei";font-size:13px;} QLabel#title {font-size:26px;font-weight:600;color:#143b32;} QLabel#caption {color:#687a74;margin-bottom:10px;} QPushButton {padding:7px 10px;border:1px solid #cbd8d2;border-radius:5px;background:white;} QLineEdit,QComboBox,QDoubleSpinBox,QTextEdit {padding:6px;border:1px solid #d3ded8;border-radius:4px;} QHeaderView::section {padding:8px;background:#eaf1ed;}')
-        self.setWindowTitle('微信文件管理器 1.0'); self.resize(1440,900)
+        self.setWindowTitle('微信文件管理器 '+__version__+' 开发版'); self.resize(1440,900)
         outer=QWidget(); self.setCentralWidget(outer); layout=QVBoxLayout(outer); layout.setContentsMargins(18,16,18,12)
         title=QLabel('微信文件管理器'); title.setObjectName('title'); layout.addWidget(title)
         caption=QLabel('中文目录 · 跨账号搜索 · 本地收藏与归档'); caption.setObjectName('caption'); layout.addWidget(caption)
@@ -44,9 +45,9 @@ class Window(QMainWindow):
         filters=QHBoxLayout(); layout.addLayout(filters)
         self.start=DateFilter('起始日期')
         self.end=DateFilter('结束日期')
-        self.minimum=QDoubleSpinBox(); self.minimum.setRange(0,1e9); self.minimum.setSuffix(' MiB 起')
-        self.maximum=QDoubleSpinBox(); self.maximum.setRange(0,1e9); self.maximum.setSuffix(' MiB 止（0=不限）')
-        self.tag_filter=QLineEdit(); self.tag_filter.setPlaceholderText('标签筛选')
+        self.minimum=QDoubleSpinBox(); self.minimum.setRange(0,1e9); self.minimum.setSuffix(' MiB 起');self.minimum.setMaximumWidth(150)
+        self.maximum=QDoubleSpinBox(); self.maximum.setRange(0,1e9); self.maximum.setSuffix(' MiB 止');self.maximum.setMaximumWidth(150);self.maximum.setToolTip('大小上限；0 表示不限')
+        self.tag_filter=QLineEdit(); self.tag_filter.setPlaceholderText('标签筛选');self.tag_filter.setMinimumWidth(120)
         for w in [self.start,self.end,self.minimum,self.maximum,self.tag_filter]: filters.addWidget(w)
         self.button(filters,'统计',self.statistics); self.button(filters,'复制 / 导出所选',self.export)
         self.button(toolbar,'标签管理',self.tag_center)
@@ -91,7 +92,7 @@ class Window(QMainWindow):
                 except ValueError: pass
             self.update_accounts()
         if self.store.accounts(): self.scan()
-        else: self.statusBar().showMessage('请添加微信文件目录，例如 D:\\xwechat_files')
+        else:self.progress_label.setText('首次使用：点击“添加微信目录”选择微信文件夹；索引和备注保存在本地，微信原文件保持原样。')
 
     def update_accounts(self):
         selected=self.account.currentData(); self.account.blockSignals(True); self.account.clear(); self.account.addItem('全部账号','')
@@ -183,6 +184,10 @@ class Window(QMainWindow):
             if text:
                 try: datetime.strptime(text,'%Y-%m-%d')
                 except ValueError:self.statusBar().showMessage('日期格式应为 YYYY-MM-DD'); return
+        if self.start.text() and self.end.text() and self.start.text()>self.end.text():
+            self.statusBar().showMessage('起始日期不能晚于结束日期。');return
+        if self.maximum.value() and self.maximum.value()<self.minimum.value():
+            self.statusBar().showMessage('大小上限不能小于下限。');return
         filters=dict(query=self.query.text().strip(),category=self.nav.get('category') or (self.category.currentText() if self.category.currentIndex()>0 else ''),account=self.account.currentData() or '',favorite=self.nav.get('favorite',False),tag=self.nav.get('tag') or self.tag_filter.text().strip(),exact_tag=self.nav.get('exact_tag',False),minimum=int(self.minimum.value()*1024**2),maximum=int(self.maximum.value()*1024**2) if self.maximum.value() else None,start=self.start.text().strip(),end=self.end.text().strip(),directory=self.nav.get('directory',''),missing=self.nav.get('missing',False))
         page=self.store.search_page(order=self.sort_order,descending=self.sort_desc,**filters)
         rows=page.rows
@@ -231,10 +236,23 @@ class Window(QMainWindow):
             self.active.update(note=self.note.toPlainText(),tags=self.tags.text(),favorite=int(self.favorite.isChecked()))
             index=next(i for i,r in enumerate(self.model.rows) if r['path']==self.active['path'])
             self.model.dataChanged.emit(self.model.index(index,0),self.model.index(index,6))
+            self.refresh_tag_nodes()
             self.edit_status.setText('✓ 已保存'); self.statusBar().showMessage('备注、标签和收藏已保存',5000)
             return True
         except Exception as e:
             QMessageBox.warning(self,'保存失败',str(e)); return False
+
+    def refresh_tag_nodes(self):
+        for i in range(self.tree.topLevelItemCount()):
+            root=self.tree.topLevelItem(i);data=root.data(0,Qt.ItemDataRole.UserRole) or {}
+            if not data.get('tags_view'):continue
+            self.tree.blockSignals(True)
+            root.takeChildren()
+            for tag,count in sorted(self.store.tags().items())[:200]:
+                node=QTreeWidgetItem(root,[f'{tag} ({count:,})'])
+                node.setData(0,Qt.ItemDataRole.UserRole,{'tag':tag,'exact_tag':True})
+            self.tree.blockSignals(False)
+            break
 
     def is_dirty(self):
         return bool(self.active and (self.note.toPlainText()!=self.active['note'] or self.tags.text()!=self.active['tags'] or self.favorite.isChecked()!=bool(self.active['favorite'])))
@@ -333,7 +351,7 @@ class Window(QMainWindow):
             except Exception as e:QMessageBox.warning(self,'备份失败',str(e))
         elif action=='恢复备份': self.restore_backup()
         elif action.startswith('查看'):QMessageBox.information(self,'本地数据',str(self.store.path))
-        else:QMessageBox.information(self,'关于','微信文件管理器 1.0\n目录识别和月份分类参考 oracis/wechat-file-organizer-gui (MIT)。\n本软件独立于微信，不解密聊天记录。\n开源许可见程序目录 licenses 文件夹。')
+        else:QMessageBox.information(self,'关于','微信文件管理器 '+__version__+'\n目录识别和月份分类参考 oracis/wechat-file-organizer-gui (MIT)。\n本软件独立于微信，不解密聊天记录。\n开源许可见程序目录 licenses 文件夹。')
 
     def export(self):
         rows=self.selected()

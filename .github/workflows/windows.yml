@@ -1,0 +1,39 @@
+name: Windows tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    strategy:
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements-lock.txt
+      - name: Test
+        run: python -m pytest -q --basetemp .tmp/ci-tests --junitxml=.tmp/test-results.xml
+      - name: Native Windows UI integration test on synthetic files
+        shell: pwsh
+        run: |
+          $env:WFM_DATA_DIR = Join-Path $PWD '.tmp/native-test'
+          $env:QT_QPA_PLATFORM = 'windows'
+          python run.py --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows test failed' }
+          Get-Content "$env:WFM_DATA_DIR/selftest.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          include-hidden-files: true
+          path: |
+            .tmp/test-results.xml
+            .tmp/native-test/selftest.json

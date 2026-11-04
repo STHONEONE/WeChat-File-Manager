@@ -103,8 +103,10 @@ class Database:
 
     def backup(self, target):
         target = Path(target).resolve()
-        if target == self.path.resolve():
+        if target == self.path.resolve() or (target.exists() and target.samefile(self.path)):
             raise ValueError('备份不能覆盖当前数据库。')
+        if hasattr(self,'source_roots') and any(target.is_relative_to(Path(root).resolve()) for root in self.source_roots()):
+            raise ValueError('备份不能写入微信原始目录。')
         with self.connect() as src, sqlite3.connect(target, factory=Connection) as dest:
             src.backup(dest)
 

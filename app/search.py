@@ -20,7 +20,9 @@ class SearchMixin:
         if favorite:clauses.append('f.favorite=1')
         if tag:
             clauses.append("instr(','||replace(f.tags, ', ', ',')||',', ','||?||',')>0" if exact_tag else 'instr(lower(f.tags),lower(?))>0');args.append(tag)
-        clauses.append('f.size>=?');args.append(minimum)
+        # A zero lower bound is not selective. Do not let it displace the
+        # timestamp index and force a full result sort on ordinary browsing.
+        clauses.append('f.size>=?' if minimum else '+f.size>=?');args.append(minimum)
         if maximum is not None:clauses.append('f.size<=?');args.append(maximum)
         if start:clauses.append("date(f.mtime,'unixepoch','localtime')>=?");args.append(start)
         if end:clauses.append("date(f.mtime,'unixepoch','localtime')<=?");args.append(end)

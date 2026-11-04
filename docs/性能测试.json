@@ -1,0 +1,45 @@
+{
+  "dataset": "50000 synthetic rows; no real WeChat data",
+  "hardware": {
+    "os": "Windows-11-10.0.26300-SP0",
+    "python": "3.13.7",
+    "logical_processors": 18,
+    "processor": "Intel(R) Core(TM) Ultra 5 125H",
+    "ram_gib": 31.6
+  },
+  "insert_seconds": 0.88,
+  "page_size": 200,
+  "repetitions": 7,
+  "results": {
+    "first_page": {
+      "median_ms": 18.037,
+      "max_ms": 22.606,
+      "returned": 200,
+      "matched": 50000
+    },
+    "chinese_note_search": {
+      "median_ms": 33.915,
+      "max_ms": 35.014,
+      "returned": 200,
+      "matched": 5000
+    },
+    "tag_filter": {
+      "median_ms": 23.875,
+      "max_ms": 24.943,
+      "returned": 200,
+      "matched": 5000
+    },
+    "sorted_size_page": {
+      "median_ms": 17.646,
+      "max_ms": 19.469,
+      "returned": 200,
+      "matched": 50000
+    },
+    "last_page": {
+      "median_ms": 41.072,
+      "max_ms": 55.635,
+      "returned": 200,
+      "matched": 50000
+    }
+  }
+}
