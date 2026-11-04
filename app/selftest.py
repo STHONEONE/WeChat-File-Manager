@@ -11,6 +11,7 @@ def run(window,data):
     folder=data/f'selftest-{time.time_ns()}'
     source=folder/'wxid_demo'/'msg'/'file'/'2026-10';source.mkdir(parents=True)
     document=source/'公开示例.txt';document.write_text('Synthetic demo only.\n',encoding='utf-8')
+    (source/'同内容副本.txt').write_bytes(document.read_bytes())
     image=QImage(480,320,QImage.Format.Format_RGB32);image.fill(QColor('#16865b'));image.save(str(source/'示例图片.png'))
     store=window.store;store.add(source.parents[2]);store.scan()
     store.rename(store.accounts()[0]['path'],'演示账号（虚构）','')
@@ -21,7 +22,24 @@ def run(window,data):
     assert result['copied']==1 and digest(document)==before
     backup=folder/'backup.sqlite';store.backup(backup);store.annotate(window.active['path'],'changed','',False);store.restore(backup)
     assert store.search(query='演示备注',favorite=True)
+    duplicates=store.detect_duplicates(settle_seconds=0);assert store.duplicate_summary()['groups']==1
+    assert store.detect_duplicates(settle_seconds=0)['cache_hits']==2
+    assert store.bulk_manage('add_tags',tags='批量演示',filters={'query':'副本'})['success']==1
+    from app.file_monitor import FileMonitor
+    from app.statistics import storage_statistics
+    monitor=FileMonitor(store,debounce=.1,max_wait=.3)
+    try:
+        assert monitor.start()
+        deadline=time.monotonic()+10
+        while '监控中' not in monitor.state and time.monotonic()<deadline:QApplication.processEvents();time.sleep(.02)
+        assert '监控中' in monitor.state
+        (source/'监控示例.txt').write_text('Synthetic monitor content.',encoding='utf-8')
+        deadline=time.monotonic()+10
+        while not store.search(query='监控示例') and time.monotonic()<deadline:QApplication.processEvents();time.sleep(.02)
+        assert store.search(query='监控示例')
+    finally:assert monitor.stop()
+    assert storage_statistics(store)['count']==4
     window.query.clear();window.reload();QApplication.processEvents()
     assert window.grab().save(str(data/'selftest.png'))
-    report={'startup':True,'search':True,'annotations':True,'export':True,'source_unchanged':True,'backup_restore':True,'version':'1.1.0'}
+    report={'startup':True,'search':True,'annotations':True,'export':True,'source_unchanged':True,'backup_restore':True,'duplicates':True,'hash_cache':True,'monitor':True,'bulk':True,'statistics':True,'version':'1.2.0'}
     (data/'selftest.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')

@@ -4,7 +4,7 @@ import threading
 import time
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS accounts(path TEXT PRIMARY KEY, name TEXT, note TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS directories(path TEXT PRIMARY KEY, account TEXT, alias TEXT DEFAULT '', count INTEGER DEFAULT 0, size INTEGER DEFAULT 0);
@@ -35,10 +35,15 @@ class Database:
         self.path = Path(path).absolute()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._index_lock = threading.RLock()
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version > SCHEMA_VERSION:
                 raise ValueError('数据库由更高版本创建，请升级程序。')
+            if version < SCHEMA_VERSION and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='files'").fetchone():
+                self.validate(db)
+                folder=self.path.parent/'backups';folder.mkdir(exist_ok=True)
+                with sqlite3.connect(folder/f'before-upgrade-{time.time_ns()}.sqlite',factory=Connection) as dest:db.backup(dest)
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript(SCHEMA)
             self.migrate(db, version)
@@ -68,6 +73,14 @@ class Database:
                 for tag in row[0].replace('，',',').split(','):
                     if tag.strip():db.execute('INSERT OR IGNORE INTO tag_catalog(name) VALUES (?)',(tag.strip(),))
             db.execute('PRAGMA user_version=3')
+        if version < 4:
+            columns={r[1] for r in db.execute('PRAGMA table_info(files)')}
+            for name in ('mtime_ns','ctime_ns'):
+                if name not in columns:db.execute(f'ALTER TABLE files ADD COLUMN {name} INTEGER DEFAULT 0')
+            db.execute('''CREATE TABLE IF NOT EXISTS hash_cache(path TEXT PRIMARY KEY,size INTEGER,mtime_ns INTEGER,ctime_ns INTEGER,identity TEXT,sha256 TEXT,verified_at REAL,valid INTEGER DEFAULT 1)''')
+            db.execute('CREATE INDEX IF NOT EXISTS hash_groups ON hash_cache(valid,sha256,size)')
+            db.execute('''CREATE TABLE IF NOT EXISTS account_scan_state(account TEXT PRIMARY KEY,scanned_at REAL,complete INTEGER,error TEXT)''')
+            db.execute('PRAGMA user_version=4')
 
     def connect(self):
         self._lock.acquire()
@@ -97,6 +110,10 @@ class Database:
             raise ValueError('备份缺少目录索引字段。')
         if version>=3 and not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tag_catalog'").fetchone():
             raise ValueError('备份缺少标签目录。')
+        if version>=4:
+            for table,columns in {'files':{'mtime_ns','ctime_ns'},'hash_cache':{'path','size','mtime_ns','ctime_ns','identity','sha256','verified_at','valid'},'account_scan_state':{'account','scanned_at','complete','error'}}.items():
+                if not columns <= {r[1] for r in db.execute(f'PRAGMA table_info({table})')}:
+                    raise ValueError('备份缺少 V1.2 数据结构：'+table)
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' LIMIT 1").fetchone():
             raise ValueError('备份包含不支持的触发器。')
         return version
