@@ -11,7 +11,7 @@ class Page:
 
 class SearchMixin:
     @staticmethod
-    def _where(query='',category='',account='',favorite=False,tag='',minimum=0,maximum=None,start='',end='',directory='',missing=False,exact_tag=False):
+    def _where(query='',category='',account='',favorite=False,tag='',minimum=0,maximum=None,start='',end='',directory='',missing=False,exact_tag=False,directories=None):
         clauses=['f.missing=?'];args=[int(missing)]
         if query:
             clauses.append('(instr(lower(f.name),lower(?))>0 OR instr(lower(f.note),lower(?))>0 OR instr(lower(f.tags),lower(?))>0)');args += [query]*3
@@ -28,6 +28,11 @@ class SearchMixin:
         if end:clauses.append("date(f.mtime,'unixepoch','localtime')<=?");args.append(end)
         if directory:
             prefix=canonical(directory)+os.sep;clauses.append('substr(f.path,1,?)=?');args += [len(prefix),prefix]
+        if directories is not None:
+            parts=[]
+            for d in directories:
+                prefix=canonical(d)+os.sep;parts.append('substr(f.path,1,?)=?');args.extend([len(prefix),prefix])
+            clauses.append('('+' OR '.join(parts)+')' if parts else '0')
         return ' AND '.join(clauses),args
 
     def search(self,query='',category='',account='',favorite=False,tag='',minimum=0,maximum=None,start='',end='',directory='',missing=False,**extra):

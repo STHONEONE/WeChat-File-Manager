@@ -4,7 +4,8 @@ import time
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QImage,QColor
-from app.core import export_files,digest
+from app.core import export_files,digest,canonical
+from app.version import __version__
 
 def run(window,data):
     if window.store.accounts():raise ValueError('自检必须使用新的空数据目录，避免修改现有个人设置。')
@@ -39,7 +40,11 @@ def run(window,data):
         assert store.search(query='监控示例')
     finally:assert monitor.stop()
     assert storage_statistics(store)['count']==4
+    window.table.selectRow(0);window.jump_to_directory();assert window.active_directory is not None
+    assert window.active_directory['path']==canonical(source)
+    window.directory_mode.setCurrentIndex(0)
+    window.show_duplicates();assert not window.duplicate_dialog.model.checked_rows();window.duplicate_dialog.close()
     window.query.clear();window.reload();QApplication.processEvents()
     assert window.grab().save(str(data/'selftest.png'))
-    report={'startup':True,'search':True,'annotations':True,'export':True,'source_unchanged':True,'backup_restore':True,'duplicates':True,'hash_cache':True,'monitor':True,'bulk':True,'statistics':True,'version':'1.2.0'}
+    report={'startup':True,'search':True,'annotations':True,'export':True,'source_unchanged':True,'backup_restore':True,'duplicates':True,'hash_cache':True,'monitor':True,'bulk':True,'statistics':True,'directory_views':True,'directory_details':True,'no_auto_duplicate_checks':True,'version':__version__}
     (data/'selftest.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')

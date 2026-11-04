@@ -81,6 +81,7 @@ class ScannerMixin:
                     previous={r['path']:dict(r) for r in db.execute('SELECT * FROM files WHERE account=?',(root,))}
                     old_dirs={r['path']:dict(r) for r in db.execute('SELECT * FROM directories WHERE account=?',(root,))}
                     aliases={r[0][6:]:r[1] for r in db.execute("SELECT key,value FROM settings WHERE key LIKE 'alias:%'")}
+                    notes={r[0][8:]:r[1] for r in db.execute("SELECT key,value FROM settings WHERE key LIKE 'dirnote:%'")}
                     for i,(path,(name,s)) in enumerate(records.items()):
                         if i%128==0 and cancelled():raise ScanCancelled()
                         changed=upsert_file(db,path,root,name,s,previous.get(path))
@@ -96,10 +97,13 @@ class ScannerMixin:
                         parent=canonical(Path(path).parent);old=old_dirs.get(path)
                         if old and (old['count'],old['size'],old['parent'])==(count,size,parent):continue
                         alias=aliases.get(path,old['alias'] if old else '')
-                        db.execute('''INSERT INTO directories(path,account,alias,count,size,parent) VALUES (?,?,?,?,?,?)
-                            ON CONFLICT(path) DO UPDATE SET count=excluded.count,size=excluded.size,parent=excluded.parent''',(path,root,alias,count,size,parent))
+                        db.execute('''INSERT INTO directories(path,account,alias,count,size,parent,note) VALUES (?,?,?,?,?,?,?)
+                            ON CONFLICT(path) DO UPDATE SET count=excluded.count,size=excluded.size,parent=excluded.parent''',(path,root,alias,count,size,parent,notes.get(path,old.get('note','') if old else '')))
                         counts['directory_updates']+=1
-                    db.execute('INSERT OR REPLACE INTO account_scan_state VALUES (?,?,?,?)',(root,time.time(),int(not errors),'\n'.join(errors[:20])))
+                    now=time.time()
+                    db.execute('''INSERT INTO account_scan_state(account,scanned_at,complete,error,last_success) VALUES (?,?,?,?,?)
+                        ON CONFLICT(account) DO UPDATE SET scanned_at=excluded.scanned_at,complete=excluded.complete,error=excluded.error,
+                        last_success=CASE WHEN excluded.complete=1 THEN excluded.last_success ELSE account_scan_state.last_success END''',(root,now,int(not errors),'\n'.join(errors[:20]),now if not errors else None))
             except ScanCancelled:
                 result['cancelled']=True;self.set_setting('state:scan',dict(result,time=time.time(),complete=False));return result
             for key,value in counts.items():result[key]+=value

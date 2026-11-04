@@ -6,7 +6,7 @@ class FilesModel(QAbstractTableModel):
     sortRequested=Signal(int,object)
     columns=['文件名','类型','大小','修改时间','所属账号','标签','收藏']
     def __init__(self):
-        super().__init__(); self.rows=[];self.store=None;self.total=0;self.filters={};self.order='mtime';self.descending=True
+        super().__init__(); self.rows=[];self.store=None;self.total=0;self.filters={};self.order='mtime';self.descending=True;self.checkable=False;self.checked_paths=set()
     def rowCount(self,parent=QModelIndex()): return 0 if parent.isValid() else len(self.rows)
     def columnCount(self,parent=QModelIndex()): return len(self.columns)
     def headerData(self,section,orientation,role=Qt.ItemDataRole.DisplayRole):
@@ -14,13 +14,29 @@ class FilesModel(QAbstractTableModel):
     def data(self,index,role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid(): return None
         r=self.rows[index.row()]; col=index.column()
+        if role==Qt.ItemDataRole.CheckStateRole and self.checkable and col==0:return Qt.CheckState.Checked if r['path'] in self.checked_paths else Qt.CheckState.Unchecked
         if role==Qt.ItemDataRole.UserRole:
             return [r['name'].lower(),r['category'],r['size'],r['mtime'],r['account_name'],r['tags'],r['favorite']][col]
         if role==Qt.ItemDataRole.DisplayRole:
             return [r['name'],r['category'],human(r['size']),datetime.fromtimestamp(r['mtime']).strftime('%Y-%m-%d %H:%M'),r['account_name'],r['tags'],'★' if r['favorite'] else ''][col]
         if role==Qt.ItemDataRole.ToolTipRole: return r['path']+('（已不存在）' if r['missing'] else '')
     def replace(self,rows):
-        self.beginResetModel();self.rows=rows;self.total=len(rows);self.store=None;self.endResetModel()
+        self.beginResetModel();self.rows=rows;self.total=len(rows);self.store=None;self.checked_paths.intersection_update(r['path'] for r in rows);self.endResetModel()
+
+    def flags(self,index):
+        result=super().flags(index)
+        if self.checkable and index.isValid() and index.column()==0:result|=Qt.ItemFlag.ItemIsUserCheckable
+        return result
+
+    def setData(self,index,value,role=Qt.ItemDataRole.EditRole):
+        if self.checkable and index.isValid() and index.column()==0 and role==Qt.ItemDataRole.CheckStateRole:
+            path=self.rows[index.row()]['path']
+            if value in (Qt.CheckState.Checked,Qt.CheckState.Checked.value):self.checked_paths.add(path)
+            else:self.checked_paths.discard(path)
+            self.dataChanged.emit(index,index,[role]);return True
+        return False
+
+    def checked_rows(self):return [row for row in self.rows if row['path'] in self.checked_paths]
 
     def configure(self,store,filters,order,descending,page):
         self.beginResetModel()
