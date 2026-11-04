@@ -11,14 +11,15 @@ class Page:
 
 class SearchMixin:
     @staticmethod
-    def _where(query='',category='',account='',favorite=False,tag='',minimum=0,maximum=None,start='',end='',directory='',missing=False):
+    def _where(query='',category='',account='',favorite=False,tag='',minimum=0,maximum=None,start='',end='',directory='',missing=False,exact_tag=False):
         clauses=['f.missing=?'];args=[int(missing)]
         if query:
             clauses.append('(instr(lower(f.name),lower(?))>0 OR instr(lower(f.note),lower(?))>0 OR instr(lower(f.tags),lower(?))>0)');args += [query]*3
         for column,value in [('category',category),('account',account)]:
             if value:clauses.append('f.'+column+'=?');args.append(value)
         if favorite:clauses.append('f.favorite=1')
-        if tag:clauses.append('instr(lower(f.tags),lower(?))>0');args.append(tag)
+        if tag:
+            clauses.append("instr(','||replace(f.tags, ', ', ',')||',', ','||?||',')>0" if exact_tag else 'instr(lower(f.tags),lower(?))>0');args.append(tag)
         clauses.append('f.size>=?');args.append(minimum)
         if maximum is not None:clauses.append('f.size<=?');args.append(maximum)
         if start:clauses.append("date(f.mtime,'unixepoch','localtime')>=?");args.append(start)
@@ -27,8 +28,8 @@ class SearchMixin:
             prefix=canonical(directory)+os.sep;clauses.append('substr(f.path,1,?)=?');args += [len(prefix),prefix]
         return ' AND '.join(clauses),args
 
-    def search(self, **filters):
-        return self.search_page(limit=None,**filters).rows
+    def search(self,query='',category='',account='',favorite=False,tag='',minimum=0,maximum=None,start='',end='',directory='',missing=False,**extra):
+        return self.search_page(limit=None,query=query,category=category,account=account,favorite=favorite,tag=tag,minimum=minimum,maximum=maximum,start=start,end=end,directory=directory,missing=missing,**extra).rows
 
     def search_page(self,limit=200,offset=0,order='mtime',descending=True,count=True,**filters):
         if order not in {'name','category','size','mtime','account_name','tags','favorite'}:raise ValueError('不支持的排序字段')

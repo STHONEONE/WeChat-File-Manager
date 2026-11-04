@@ -17,7 +17,9 @@ from app.database import Database
 from app.search import SearchMixin
 from app.scanner import ScannerMixin
 
-class Store(SearchMixin, ScannerMixin, Database):
+from app.annotations import AnnotationMixin
+
+class Store(AnnotationMixin, SearchMixin, ScannerMixin, Database):
     def accounts(self):
         with self.connect() as db: return [dict(r) for r in db.execute('SELECT * FROM accounts ORDER BY name')]
 
@@ -33,10 +35,6 @@ class Store(SearchMixin, ScannerMixin, Database):
     def source_roots(self):
         with self.connect() as db:
             return [r[0] for r in db.execute("SELECT value FROM settings WHERE key LIKE 'source:%'")]+[a['path'] for a in self.accounts()]
-
-    def annotate(self, path, note, tags, favorite):
-        tags = ', '.join(dict.fromkeys(t.strip() for t in tags.replace('，',',').split(',') if t.strip()))
-        with self.connect() as db: db.execute('UPDATE files SET note=?,tags=?,favorite=? WHERE path=?',(note,tags,int(favorite),path))
 
     def rename(self, path, name, note=None):
         with self.connect() as db:

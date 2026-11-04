@@ -4,7 +4,7 @@ import threading
 import time
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS accounts(path TEXT PRIMARY KEY, name TEXT, note TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS directories(path TEXT PRIMARY KEY, account TEXT, alias TEXT DEFAULT '', count INTEGER DEFAULT 0, size INTEGER DEFAULT 0);
@@ -62,6 +62,12 @@ class Database:
                 'CREATE INDEX IF NOT EXISTS directory_parent ON directories(parent,path)',
             ):db.execute(sql)
             db.execute('PRAGMA user_version=2')
+        if version < 3:
+            db.execute('CREATE TABLE IF NOT EXISTS tag_catalog(name TEXT PRIMARY KEY)')
+            for row in db.execute("SELECT DISTINCT tags FROM files WHERE tags<>''").fetchall():
+                for tag in row[0].replace('，',',').split(','):
+                    if tag.strip():db.execute('INSERT OR IGNORE INTO tag_catalog(name) VALUES (?)',(tag.strip(),))
+            db.execute('PRAGMA user_version=3')
 
     def connect(self):
         self._lock.acquire()
@@ -87,6 +93,10 @@ class Database:
                 raise ValueError('不是本程序的有效备份：缺少数据表 '+name)
             if not columns <= {r[1] for r in db.execute(f'PRAGMA table_info({name})')}:
                 raise ValueError('备份数据表字段不完整：'+name)
+        if version>=2 and 'parent' not in {r[1] for r in db.execute('PRAGMA table_info(directories)')}:
+            raise ValueError('备份缺少目录索引字段。')
+        if version>=3 and not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tag_catalog'").fetchone():
+            raise ValueError('备份缺少标签目录。')
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' LIMIT 1").fetchone():
             raise ValueError('备份包含不支持的触发器。')
         return version
