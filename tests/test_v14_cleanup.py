@@ -145,9 +145,13 @@ def test_duplicate_page_buttons_use_background_preview_and_confirm(tmp_path,monk
     page.suggest.click()
     wait_for(lambda:len(page.checked)==4 and not window.worker.isRunning())
     assert not service.backend.calls
+    window.monitor_updated({'result':{'changed':0,'deleted':0,'errors':[]}})
+    assert len(page.checked)==4
     first_checked=next(iter(page.checked))
     page.recycle.click()
     wait_for(lambda:bool(results) and not window.worker.isRunning())
     assert results[0]['result']['success']==3 and Path(first_checked).exists()
     assert first_checked not in service.backend.calls
+    window.monitor_updated({'result':{'changed':1}})
+    assert not page.checked and not page.suggest.isEnabled()
     window.close()

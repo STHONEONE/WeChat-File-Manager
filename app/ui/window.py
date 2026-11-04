@@ -533,11 +533,12 @@ class Window(QMainWindow):
         self.start_worker(lambda progress:self.store.scan(progress,lambda:QThread.currentThread().isInterruptionRequested()),self.scan_done,True)
 
     def scan_done(self,out):
-        self.invalidate_duplicates()
         self.rebuild_tree()
         if 'error' in out:
+            self.invalidate_duplicates()
             self.store.set_setting('state:scan',{'complete':False,'running':False,'errors':[out['error']]});QMessageBox.warning(self,'扫描失败',out['error']); return
         r=out['result']; self.statusBar().showMessage(f'扫描'+('已停止' if r['cancelled'] else '完成')+f'：{r["files"]:,} 个可管理文件；{len(r["errors"])} 个访问异常')
+        self.refresh_duplicate_validity(r)
         self.progress_label.setText(f'扫描'+('已取消' if r['cancelled'] else '完成')+f'；{r["files"]:,} 个可管理文件；{len(r["errors"])} 个访问异常')
         if r['errors']:QMessageBox.warning(self,'部分目录无法读取','已保留未能完整扫描账号的旧文件状态。\n'+'\n'.join(r['errors'][:15]))
         if self.store.setting('monitor:enabled',False):
@@ -650,6 +651,10 @@ class Window(QMainWindow):
         if self.duplicate_dialog:
             self.duplicate_dialog.invalidate()
 
+    def refresh_duplicate_validity(self,result):
+        if result.get('changed') or result.get('deleted') or result.get('errors'):
+            self.invalidate_duplicates()
+
     def suggest_duplicates(self):
         if self.worker and self.worker.isRunning():return
         self.task_kind='suggest'
@@ -711,8 +716,8 @@ class Window(QMainWindow):
         self.monitor_label.setText(text+' · 全量扫描 '+stamp);self.monitor_label.setToolTip(text)
 
     def monitor_updated(self,message):
+        self.refresh_duplicate_validity(message['result'])
         if message['result'].get('cancelled'):return
-        self.invalidate_duplicates()
         if self.is_dirty():self.statusBar().showMessage('索引已自动更新；当前有未保存修改，保存或刷新后查看新列表。');return
         self.reload(preserve=True)
         counts=self.store.category_counts(self.account.currentData() or '')
