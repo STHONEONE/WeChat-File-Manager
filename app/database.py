@@ -4,7 +4,7 @@ import threading
 import time
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS accounts(path TEXT PRIMARY KEY, name TEXT, note TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS directories(path TEXT PRIMARY KEY, account TEXT, alias TEXT DEFAULT '', count INTEGER DEFAULT 0, size INTEGER DEFAULT 0);
@@ -48,6 +48,20 @@ class Database:
         if version < 1:
             # V1.0 had user_version=0. Existing annotation columns stay intact.
             db.execute('PRAGMA user_version=1')
+        if version < 2:
+            columns={r[1] for r in db.execute('PRAGMA table_info(directories)')}
+            if 'parent' not in columns:db.execute('ALTER TABLE directories ADD COLUMN parent TEXT')
+            for row in db.execute('SELECT path FROM directories').fetchall():
+                db.execute('UPDATE directories SET parent=? WHERE path=?',(str(Path(row[0]).parent),row[0]))
+            for sql in (
+                'CREATE INDEX IF NOT EXISTS file_recent ON files(missing,mtime DESC,path)',
+                'CREATE INDEX IF NOT EXISTS file_category_recent ON files(missing,category,mtime DESC,path)',
+                'CREATE INDEX IF NOT EXISTS file_account_recent ON files(missing,account,mtime DESC,path)',
+                'CREATE INDEX IF NOT EXISTS file_favorites ON files(missing,favorite,mtime DESC,path)',
+                'CREATE INDEX IF NOT EXISTS file_size ON files(missing,size)',
+                'CREATE INDEX IF NOT EXISTS directory_parent ON directories(parent,path)',
+            ):db.execute(sql)
+            db.execute('PRAGMA user_version=2')
 
     def connect(self):
         self._lock.acquire()

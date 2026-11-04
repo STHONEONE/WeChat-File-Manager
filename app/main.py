@@ -4,9 +4,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QTimer, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QIdentityProxyModel, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QImageReader, QPixmap, QIcon, QPainter, QColor, QFontDatabase, QFont
-from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLineEdit,QComboBox,QPushButton,QSplitter,QTreeWidget,QTreeWidgetItem,QTableView,QLabel,QTextEdit,QCheckBox,QFormLayout,QFileDialog,QMessageBox,QInputDialog,QMenu,QDoubleSpinBox,QDialog,QDialogButtonBox)
+from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLineEdit,QComboBox,QPushButton,QSplitter,QTreeWidget,QTreeWidgetItem,QTableView,QLabel,QTextEdit,QCheckBox,QFormLayout,QFileDialog,QMessageBox,QInputDialog,QMenu,QDoubleSpinBox,QDialog,QDialogButtonBox,QProgressBar)
 from app.core import Store, CATEGORIES, LABELS, candidates, canonical, human, export_files
 
 class Worker(QThread):
@@ -18,26 +18,11 @@ class Worker(QThread):
         try: self.done.emit({'result':self.fn(self.progress.emit)})
         except Exception as e: self.done.emit({'error':str(e)})
 
-class FilesModel(QAbstractTableModel):
-    columns=['文件名','类型','大小','修改时间','所属账号','标签','收藏']
-    def __init__(self): super().__init__(); self.rows=[]
-    def rowCount(self,parent=QModelIndex()): return 0 if parent.isValid() else len(self.rows)
-    def columnCount(self,parent=QModelIndex()): return len(self.columns)
-    def headerData(self,section,orientation,role=Qt.ItemDataRole.DisplayRole):
-        if role==Qt.ItemDataRole.DisplayRole and orientation==Qt.Orientation.Horizontal: return self.columns[section]
-    def data(self,index,role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid(): return None
-        r=self.rows[index.row()]; col=index.column()
-        if role==Qt.ItemDataRole.UserRole:
-            return [r['name'].lower(),r['category'],r['size'],r['mtime'],r['account_name'],r['tags'],r['favorite']][col]
-        if role==Qt.ItemDataRole.DisplayRole:
-            return [r['name'],r['category'],human(r['size']),datetime.fromtimestamp(r['mtime']).strftime('%Y-%m-%d %H:%M'),r['account_name'],r['tags'],'★' if r['favorite'] else ''][col]
-        if role==Qt.ItemDataRole.ToolTipRole: return r['path']+('（已不存在）' if r['missing'] else '')
-    def replace(self,rows): self.beginResetModel(); self.rows=rows; self.endResetModel()
+from app.ui.file_model import FilesModel
 
 class Window(QMainWindow):
     def __init__(self,store, auto=True):
-        super().__init__(); self.store=store; self.worker=None; self.active=None; self.nav={}; self.directory_data={}
+        super().__init__(); self.store=store; self.worker=None; self.active=None; self.nav={}; self.directory_data={}; self.sort_order='mtime'; self.sort_desc=True
         font=Path(os.environ.get('WINDIR','C:/Windows'))/'Fonts'/'msyh.ttc'
         if font.exists(): QFontDatabase.addApplicationFont(str(font))
         self.setFont(QFont('Microsoft YaHei',10))
@@ -62,9 +47,11 @@ class Window(QMainWindow):
         self.tag_filter=QLineEdit(); self.tag_filter.setPlaceholderText('标签筛选')
         for w in [self.start,self.end,self.minimum,self.maximum,self.tag_filter]: filters.addWidget(w)
         self.button(filters,'统计',self.statistics); self.button(filters,'复制 / 导出所选',self.export)
+        self.progress_label=QLabel('就绪');self.progress_label.setWordWrap(True);layout.addWidget(self.progress_label)
+        self.progress_bar=QProgressBar();self.progress_bar.setRange(0,0);self.progress_bar.hide();layout.addWidget(self.progress_bar)
         splitter=QSplitter(); layout.addWidget(splitter,1)
         self.tree=QTreeWidget(); self.tree.setHeaderLabel('文件导航'); splitter.addWidget(self.tree)
-        self.model=FilesModel(); self.proxy=QSortFilterProxyModel(); self.proxy.setSourceModel(self.model); self.proxy.setSortRole(Qt.ItemDataRole.UserRole)
+        self.model=FilesModel(); self.proxy=QIdentityProxyModel(); self.proxy.setSourceModel(self.model)
         self.table=QTableView(); self.table.setModel(self.proxy); self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows); self.table.setSelectionMode(QTableView.SelectionMode.ExtendedSelection); self.table.setSortingEnabled(True); self.table.setAlternatingRowColors(True); self.table.verticalHeader().hide(); self.table.setColumnWidth(0,360); self.table.setColumnWidth(3,155); splitter.addWidget(self.table)
         detail=QWidget(); form=QVBoxLayout(detail); self.info=QLabel('选择文件查看详情'); self.info.setWordWrap(True); self.info.setTextFormat(Qt.TextFormat.PlainText); self.info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse); form.addWidget(self.info)
         self.preview=QLabel('图片预览'); self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.preview.setMinimumHeight(180); form.addWidget(self.preview)
@@ -85,6 +72,8 @@ class Window(QMainWindow):
         for w in [self.query,self.start,self.end,self.tag_filter]: w.textChanged.connect(lambda:self.timer.start())
         for w in [self.minimum,self.maximum]: w.valueChanged.connect(lambda:self.timer.start())
         self.category.currentIndexChanged.connect(self.reload); self.account.currentIndexChanged.connect(self.rebuild_tree)
+        self.model.sortRequested.connect(self.sort_changed)
+        self.tree.itemExpanded.connect(self.expand_directory)
         self.update_accounts(); self.rebuild_tree()
         if auto: QTimer.singleShot(500,self.startup)
 
@@ -117,21 +106,19 @@ class Window(QMainWindow):
         self.tree.blockSignals(True); self.tree.clear()
         def item(parent,title,data):
             i=QTreeWidgetItem(parent,[title]); i.setData(0,Qt.ItemDataRole.UserRole,data); return i
-        all_item=item(self.tree,'全部文件',{})
-        for cat in [*CATEGORIES,'其他文件']: item(self.tree,cat,{'category':cat})
+        counts=self.store.category_counts(self.account.currentData() or '')
+        all_item=item(self.tree,f'全部文件 ({sum(c["count"] for c in counts.values()):,})',{})
+        for cat in [*CATEGORIES,'其他文件']: item(self.tree,f'{cat} ({counts.get(cat,{}).get("count",0):,})',{'category':cat})
         item(self.tree,'★ 收藏',{'favorite':True}); item(self.tree,'我的标签',{'tags_view':True}); item(self.tree,'已不存在的文件',{'missing':True})
         raw=item(self.tree,'微信原始目录（双击可设置别名）',{'raw':True}); self.directory_data={}
         selected=self.account.currentData()
         for a in self.store.accounts():
             if selected and selected!=a['path']:continue
             root_item=item(raw,a['name'],{'directory':a['path'],'account_edit':True}); nodes={a['path']:root_item}
-            for d in self.store.directories(a['path']):
-                self.directory_data[d['path']]=d
-                if d['path']==a['path']:continue
-                p=Path(d['path']); label=d['alias'] or LABELS.get(p.name,p.name)
-                if len(p.name)==7 and p.name[4]=='-': label=p.name[:4]+'年'+p.name[5:]+'月'
-                if d['alias']:label=d['alias']
-                n=item(nodes.get(canonical(p.parent),root_item),label,{'directory':d['path']}); n.setToolTip(0,f"{d['path']}\n{d['count']:,} 个文件 / {human(d['size'])}"); nodes[d['path']]=n
+            root_item.setToolTip(0,a['path'])
+            info=self.store.directory_info(a['path'])
+            if info:self.directory_data[a['path']]=info
+            QTreeWidgetItem(root_item,['展开以加载目录…'])
         raw.setExpanded(True); self.tree.setCurrentItem(all_item); self.nav={}; self.tree.blockSignals(False); self.reload()
 
     def nav_changed(self):
@@ -142,10 +129,40 @@ class Window(QMainWindow):
             if ok:self.tag_filter.setText(tag)
         self.reload()
 
+    def sort_changed(self,column,order):
+        if not self.confirm_pending():return
+        self.sort_order=['name','category','size','mtime','account_name','tags','favorite'][column]
+        self.sort_desc=order==Qt.SortOrder.DescendingOrder
+        self.reload()
+
+    def expand_directory(self,item):
+        data=item.data(0,Qt.ItemDataRole.UserRole) or {}
+        if not data.get('directory') or data.get('loaded'):return
+        self.load_directory_page(item,data['directory'],0)
+
+    def load_directory_page(self,item,path,offset):
+        if offset==0:
+            item.takeChildren()
+            data=item.data(0,Qt.ItemDataRole.UserRole);data['loaded']=True;item.setData(0,Qt.ItemDataRole.UserRole,data)
+        children=self.store.directory_children(path,offset=offset)
+        for d in children:
+            self.directory_data[d['path']]=d;p=Path(d['path'])
+            label=d['alias'] or LABELS.get(p.name,p.name)
+            if not d['alias'] and len(p.name)==7 and p.name[4]=='-':label=p.name[:4]+'年'+p.name[5:]+'月'
+            node=QTreeWidgetItem(item,[f'{label} ({d["count"]:,})'])
+            node.setData(0,Qt.ItemDataRole.UserRole,{'directory':d['path'],'label':label})
+            node.setToolTip(0,f'{d["path"]}\n{d["count"]:,} 个文件 / {human(d["size"])}')
+            node.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+        if len(children)==200:
+            more=QTreeWidgetItem(item,['加载更多目录…'])
+            more.setData(0,Qt.ItemDataRole.UserRole,{'more_parent':path,'offset':offset+200})
+
     def alias_dialog(self,item,column):
         data=item.data(0,Qt.ItemDataRole.UserRole) or {}; path=data.get('directory')
+        if data.get('more_parent'):
+            parent=item.parent();offset=data['offset'];parent.takeChild(parent.indexOfChild(item));self.load_directory_page(parent,data['more_parent'],offset);return
         if not path:return
-        name,ok=QInputDialog.getText(self,'自定义显示名称','只在本程序内生效：',text=item.text(0))
+        name,ok=QInputDialog.getText(self,'自定义显示名称','只在本程序内生效：',text=data.get('label',item.text(0)))
         if not ok or not name.strip():return
         if data.get('account_edit'):
             a=next(a for a in self.store.accounts() if a['path']==path)
@@ -162,10 +179,12 @@ class Window(QMainWindow):
             if text:
                 try: datetime.strptime(text,'%Y-%m-%d')
                 except ValueError:self.statusBar().showMessage('日期格式应为 YYYY-MM-DD'); return
-        rows=self.store.search(query=self.query.text().strip(),category=self.nav.get('category') or (self.category.currentText() if self.category.currentIndex()>0 else ''),account=self.account.currentData() or '',favorite=self.nav.get('favorite',False),tag=self.tag_filter.text().strip(),minimum=int(self.minimum.value()*1024**2),maximum=int(self.maximum.value()*1024**2) if self.maximum.value() else None,start=self.start.text().strip(),end=self.end.text().strip(),directory=self.nav.get('directory',''),missing=self.nav.get('missing',False))
-        self.active=None; self.model.replace(rows); self.info.setText('选择文件查看详情'); self.path.clear(); self.note.clear(); self.tags.clear(); self.preview.clear(); self.favorite.setChecked(False)
+        filters=dict(query=self.query.text().strip(),category=self.nav.get('category') or (self.category.currentText() if self.category.currentIndex()>0 else ''),account=self.account.currentData() or '',favorite=self.nav.get('favorite',False),tag=self.tag_filter.text().strip(),minimum=int(self.minimum.value()*1024**2),maximum=int(self.maximum.value()*1024**2) if self.maximum.value() else None,start=self.start.text().strip(),end=self.end.text().strip(),directory=self.nav.get('directory',''),missing=self.nav.get('missing',False))
+        page=self.store.search_page(order=self.sort_order,descending=self.sort_desc,**filters)
+        rows=page.rows
+        self.active=None; self.model.configure(self.store,filters,self.sort_order,self.sort_desc,page); self.info.setText('选择文件查看详情'); self.path.clear(); self.note.clear(); self.tags.clear(); self.preview.clear(); self.favorite.setChecked(False)
         d=self.directory_data.get(self.nav.get('directory'))
-        text=f'当前 {len(rows):,} 个可管理文件 · {human(sum(r["size"] for r in rows))}'
+        text=f'共 {page.total:,} 个可管理文件 · {human(page.size)} · 首批 {len(rows)} 个，向下滚动加载更多'
         if d:text+=f' | 原目录含内部数据：{d["count"]:,} 个文件 / {human(d["size"])}'
         self.statusBar().showMessage(text)
 
@@ -231,7 +250,11 @@ class Window(QMainWindow):
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(p))):QMessageBox.warning(self,'打开失败','系统未能打开此文件，请检查文件关联。')
 
     def reveal(self):
-        if self.active:QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.active['path']).parent)))
+        if self.active:
+            if sys.platform=='win32' and Path(self.active['path']).is_file():
+                import subprocess
+                subprocess.Popen(['explorer.exe','/select,',os.path.normpath(self.active['path'])])
+            else:QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.active['path']).parent)))
 
     def context_menu(self,pos):
         m=QMenu(self); m.addAction('打开文件',self.open_file); m.addAction('打开所在文件夹',self.reveal); m.addAction('复制路径',lambda:QApplication.clipboard().setText(self.path.toPlainText())); m.addAction('复制 / 导出所选',self.export); m.exec(self.table.viewport().mapToGlobal(pos))
@@ -239,10 +262,14 @@ class Window(QMainWindow):
     def start_worker(self,fn,done,scan=False):
         if self.worker and self.worker.isRunning():QMessageBox.information(self,'任务运行中','请等待当前任务完成。'); return
         self.scan_button.setEnabled(False); self.add_button.setEnabled(False); self.stop_button.setEnabled(scan)
-        self.worker=Worker(fn); self.worker.progress.connect(self.statusBar().showMessage)
+        self.progress_bar.show()
+        self.worker=Worker(fn); self.worker.progress.connect(self.update_progress)
         self.worker.done.connect(done); self.worker.finished.connect(self.task_finished); self.worker.start()
 
-    def task_finished(self):self.scan_button.setEnabled(True); self.add_button.setEnabled(True); self.stop_button.setEnabled(False)
+    def update_progress(self,text):
+        self.progress_label.setText(text);self.statusBar().showMessage(text)
+
+    def task_finished(self):self.scan_button.setEnabled(True); self.add_button.setEnabled(True); self.stop_button.setEnabled(False);self.progress_bar.hide()
 
     def scan(self):
         if not self.confirm_pending(): return
@@ -253,16 +280,17 @@ class Window(QMainWindow):
         self.rebuild_tree()
         if 'error' in out:QMessageBox.warning(self,'扫描失败',out['error']); return
         r=out['result']; self.statusBar().showMessage(f'扫描'+('已停止' if r['cancelled'] else '完成')+f'：{r["files"]:,} 个可管理文件；{len(r["errors"])} 个访问异常')
+        self.progress_label.setText(f'扫描'+('已取消' if r['cancelled'] else '完成')+f'；{r["files"]:,} 个可管理文件；{len(r["errors"])} 个访问异常')
         if r['errors']:QMessageBox.warning(self,'部分目录无法读取','已保留未能完整扫描账号的旧文件状态。\n'+'\n'.join(r['errors'][:15]))
 
     def statistics(self):
-        dirs=self.store.directories(); roots={a['path'] for a in self.store.accounts()}; rows=self.store.search(); lines=['全账号统计（包含内部文件的总量来自目录元数据）：']
+        counts=self.store.category_counts();lines=['全账号统计（包含内部文件的总量来自目录元数据）：']
         for a in self.store.accounts():
-            d=next((d for d in dirs if d['path']==a['path']),None)
+            d=self.store.directory_info(a['path'])
             if d:lines.append(f'{a["name"]}：{d["count"]:,} 个 / {human(d["size"])}')
-        lines.append(f'可管理文件：{len(rows):,} 个 / {human(sum(r["size"] for r in rows))}')
+        lines.append(f'可管理文件：{sum(c["count"] for c in counts.values()):,} 个 / {human(sum(c["size"] for c in counts.values()))}')
         for c in [*CATEGORIES,'其他文件']:
-            rs=[r for r in rows if r['category']==c]; lines.append(f'{c}：{len(rs):,} 个 / {human(sum(r["size"] for r in rs))}')
+            cstat=counts.get(c,{'count':0,'size':0});lines.append(f'{c}：{cstat["count"]:,} 个 / {human(cstat["size"])}')
         QMessageBox.information(self,'文件统计','\n'.join(lines))
 
     def settings(self):
