@@ -57,25 +57,9 @@ def human(n):
         if n < 1024 or unit == 'TiB': return f'{n:,.1f} {unit}'
         n /= 1024
 
-class Store:
-    def __init__(self, path):
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connect() as db:
-            db.executescript('''
-            PRAGMA journal_mode=WAL;
-            CREATE TABLE IF NOT EXISTS accounts(path TEXT PRIMARY KEY, name TEXT, note TEXT DEFAULT '');
-            CREATE TABLE IF NOT EXISTS directories(path TEXT PRIMARY KEY, account TEXT, alias TEXT DEFAULT '', count INTEGER DEFAULT 0, size INTEGER DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, account TEXT, name TEXT, category TEXT, size INTEGER, mtime REAL, month TEXT, identity TEXT, missing INTEGER DEFAULT 0, seen TEXT, note TEXT DEFAULT '', tags TEXT DEFAULT '', favorite INTEGER DEFAULT 0);
-            CREATE INDEX IF NOT EXISTS file_account ON files(account);
-            CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
-            ''')
+from app.database import Database
 
-    def connect(self):
-        db = sqlite3.connect(self.path, timeout=30)
-        db.row_factory = sqlite3.Row
-        return db
-
+class Store(Database):
     def accounts(self):
         with self.connect() as db: return [dict(r) for r in db.execute('SELECT * FROM accounts ORDER BY name')]
 
@@ -173,8 +157,6 @@ class Store:
         self.rename(path,value)
         with self.connect() as db: db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',('alias:'+path,value))
 
-    def backup(self, target):
-        with self.connect() as src, sqlite3.connect(target) as dest: src.backup(dest)
 
 def digest(path):
     h=hashlib.sha256()

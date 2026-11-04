@@ -72,6 +72,10 @@ class Window(QMainWindow):
         form.addWidget(QLabel('备注')); self.note=QTextEdit(); self.note.setMaximumHeight(140); form.addWidget(self.note)
         form.addWidget(QLabel('标签（逗号分隔）')); self.tags=QLineEdit(); form.addWidget(self.tags)
         self.favorite=QCheckBox('收藏此文件'); form.addWidget(self.favorite)
+        self.edit_status=QLabel('未修改'); form.addWidget(self.edit_status)
+        self.note.textChanged.connect(self.edit_changed)
+        self.tags.textChanged.connect(self.edit_changed)
+        self.favorite.toggled.connect(self.edit_changed)
         actions=QHBoxLayout(); form.addLayout(actions); self.button(actions,'保存备注',self.save_note); self.button(actions,'打开文件',self.open_file)
         self.button(form,'打开所在文件夹',self.reveal); self.button(form,'复制路径',lambda:QApplication.clipboard().setText(self.path.toPlainText())); form.addStretch(); splitter.addWidget(detail); splitter.setSizes([240,850,320])
         self.tree.itemSelectionChanged.connect(self.nav_changed); self.tree.itemDoubleClicked.connect(self.alias_dialog)
@@ -152,6 +156,7 @@ class Window(QMainWindow):
         self.rebuild_tree()
 
     def reload(self,*args):
+        if not self.confirm_pending(): return
         for w in [self.start,self.end]:
             text=w.text().strip()
             if text:
@@ -168,6 +173,14 @@ class Window(QMainWindow):
         return [self.model.rows[self.proxy.mapToSource(i).row()] for i in self.table.selectionModel().selectedRows()]
 
     def selection_changed(self,*args):
+        if not self.confirm_pending():
+            if self.active:
+                index=next((i for i,r in enumerate(self.model.rows) if r['path']==self.active['path']),None)
+                if index is not None:
+                    self.table.selectionModel().blockSignals(True)
+                    self.table.selectRow(self.proxy.mapFromSource(self.model.index(index,0)).row())
+                    self.table.selectionModel().blockSignals(False)
+            return
         selected=self.selected(); self.statusBar().showMessage(f'当前 {len(self.model.rows):,} 个文件 · 选中 {len(selected)} 个 · {human(sum(r["size"] for r in selected))}')
         if not selected:return
         r=selected[0]; self.active=r; self.info.setText(f'{r["name"]}\n{r["category"]} · {human(r["size"])}\n账号：{r["account_name"]}'+('\n文件已不存在' if r['missing'] else '')); self.path.setPlainText(r['path']); self.note.setPlainText(r['note']); self.tags.setText(r['tags']); self.favorite.setChecked(bool(r['favorite'])); self.preview.clear()
@@ -180,7 +193,34 @@ class Window(QMainWindow):
         else:self.preview.setText('使用系统关联程序打开；加密附件仅显示元数据')
 
     def save_note(self):
-        if self.active:self.store.annotate(self.active['path'],self.note.toPlainText(),self.tags.text(),self.favorite.isChecked()); self.reload()
+        if not self.active: return False
+        try:
+            self.store.annotate(self.active['path'],self.note.toPlainText(),self.tags.text(),self.favorite.isChecked())
+            self.active.update(note=self.note.toPlainText(),tags=self.tags.text(),favorite=int(self.favorite.isChecked()))
+            index=next(i for i,r in enumerate(self.model.rows) if r['path']==self.active['path'])
+            self.model.dataChanged.emit(self.model.index(index,0),self.model.index(index,6))
+            self.edit_status.setText('✓ 已保存'); self.statusBar().showMessage('备注、标签和收藏已保存',5000)
+            return True
+        except Exception as e:
+            QMessageBox.warning(self,'保存失败',str(e)); return False
+
+    def is_dirty(self):
+        return bool(self.active and (self.note.toPlainText()!=self.active['note'] or self.tags.text()!=self.active['tags'] or self.favorite.isChecked()!=bool(self.active['favorite'])))
+
+    def edit_changed(self,*args):
+        self.edit_status.setText('● 有未保存的修改' if self.is_dirty() else '未修改')
+
+    def confirm_pending(self):
+        if not self.is_dirty(): return True
+        choice=QMessageBox.warning(self,'尚未保存','备注、标签或收藏有修改，是否保存？',QMessageBox.StandardButton.Save|QMessageBox.StandardButton.Discard|QMessageBox.StandardButton.Cancel,QMessageBox.StandardButton.Save)
+        if choice==QMessageBox.StandardButton.Save: return self.save_note()
+        if choice==QMessageBox.StandardButton.Discard:
+            # Keep the indexed values unchanged; the caller can now change context.
+            self.note.blockSignals(True); self.tags.blockSignals(True); self.favorite.blockSignals(True)
+            self.note.setPlainText(self.active['note']);self.tags.setText(self.active['tags']);self.favorite.setChecked(bool(self.active['favorite']))
+            self.note.blockSignals(False);self.tags.blockSignals(False);self.favorite.blockSignals(False)
+            self.edit_changed(); return True
+        return False
 
     def open_file(self):
         if not self.active:return
@@ -205,6 +245,7 @@ class Window(QMainWindow):
     def task_finished(self):self.scan_button.setEnabled(True); self.add_button.setEnabled(True); self.stop_button.setEnabled(False)
 
     def scan(self):
+        if not self.confirm_pending(): return
         self.statusBar().showMessage('开始扫描…')
         self.start_worker(lambda progress:self.store.scan(progress,lambda:QThread.currentThread().isInterruptionRequested()),self.scan_done,True)
 
@@ -225,7 +266,7 @@ class Window(QMainWindow):
         QMessageBox.information(self,'文件统计','\n'.join(lines))
 
     def settings(self):
-        action,ok=QInputDialog.getItem(self,'设置与数据','选择操作',['备份索引、备注和收藏','查看本地数据位置','关于与许可证'],0,False)
+        action,ok=QInputDialog.getItem(self,'设置与数据','选择操作',['备份索引、备注和收藏','恢复备份','查看本地数据位置','关于与许可证'],0,False)
         if not ok:return
         if action.startswith('备份'):
             target,_=QFileDialog.getSaveFileName(self,'备份数据','微信文件管理器备份.sqlite','SQLite (*.sqlite)')
@@ -233,6 +274,7 @@ class Window(QMainWindow):
             if canonical(target)==canonical(self.store.path) or any(Path(target).resolve().is_relative_to(Path(root).resolve()) for root in self.store.source_roots()):QMessageBox.warning(self,'无法备份','请选择微信原目录和当前数据库以外的位置。'); return
             try:self.store.backup(target); QMessageBox.information(self,'备份完成',target)
             except Exception as e:QMessageBox.warning(self,'备份失败',str(e))
+        elif action=='恢复备份': self.restore_backup()
         elif action.startswith('查看'):QMessageBox.information(self,'本地数据',str(self.store.path))
         else:QMessageBox.information(self,'关于','微信文件管理器 1.0\n目录识别和月份分类参考 oracis/wechat-file-organizer-gui (MIT)。\n本软件独立于微信，不解密聊天记录。\n开源许可见程序目录 licenses 文件夹。')
 
@@ -248,6 +290,20 @@ class Window(QMainWindow):
         if QMessageBox.question(self,'确认复制',f'复制 {len(rows)} 个文件\n源目录：微信账号内的原始路径（详情栏可查看）\n目标：{target}\n方式：{mode}；重名：{conflict}\n仅创建副本，源文件保持原样。')!=QMessageBox.StandardButton.Yes:return
         self.start_worker(lambda progress:export_files(rows,target,mode,conflict,self.store.source_roots(),progress),self.export_done)
 
+    def restore_backup(self):
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(self,'任务运行中','请等待扫描或导出完成再恢复。');return
+        if not self.confirm_pending():return
+        source,_=QFileDialog.getOpenFileName(self,'选择本程序备份','','SQLite (*.sqlite *.sqlite3 *.db)')
+        if not source:return
+        if any(Path(source).resolve().is_relative_to(Path(root).resolve()) for root in self.store.source_roots()):
+            QMessageBox.warning(self,'无法恢复','请使用微信原始目录以外的程序备份。');return
+        if QMessageBox.question(self,'恢复备份','恢复将替换当前索引和个人设置。恢复前会自动备份当前数据，是否继续？')!=QMessageBox.StandardButton.Yes:return
+        try:
+            rollback=self.store.restore(source);self.active=None;self.update_accounts();self.rebuild_tree()
+            QMessageBox.information(self,'恢复完成','恢复成功。原数据自动备份至：\n'+str(rollback))
+        except Exception as e:QMessageBox.warning(self,'恢复失败',str(e))
+
     def export_done(self,out):
         if 'error' in out:QMessageBox.warning(self,'导出失败',out['error']); return
         r=out['result']; QMessageBox.information(self,'复制结果',f'成功 {r["copied"]}；跳过 {r["skipped"]}；失败 {len(r["failures"])}\n清单：{r["manifest"]}\n'+'\n'.join(r['failures'][:10]))
@@ -255,7 +311,8 @@ class Window(QMainWindow):
     def closeEvent(self,event):
         if self.worker and self.worker.isRunning():
             self.worker.requestInterruption(); QMessageBox.information(self,'任务仍在运行','已请求停止扫描。请等待当前扫描或复制完成后关闭。'); event.ignore()
-        else:event.accept()
+        elif self.confirm_pending():event.accept()
+        else:event.ignore()
 
 def main():
     app=QApplication(sys.argv); app.setApplicationName('WeChatFileManager'); app.setStyle('Fusion')
