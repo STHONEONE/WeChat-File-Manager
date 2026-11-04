@@ -21,7 +21,10 @@ jobs:
       - name: Install pinned dependencies
         run: python -m pip install -r requirements-lock.txt
       - name: Test
-        run: python -m pytest -q --basetemp .tmp/ci-tests --junitxml=.tmp/test-results.xml
+        run: |
+          New-Item -ItemType Directory -Path .tmp -Force | Out-Null
+          python -m pytest -q --basetemp .tmp/ci-tests --junitxml=.tmp/test-results.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Native Windows UI integration test on synthetic files
         shell: pwsh
         run: |
