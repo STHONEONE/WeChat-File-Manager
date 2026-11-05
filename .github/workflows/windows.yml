@@ -31,7 +31,11 @@ jobs:
           $env:WFM_DATA_DIR = Join-Path $PWD '.tmp/native-test'
           $env:QT_QPA_PLATFORM = 'windows'
           python run.py --self-test
-          if ($LASTEXITCODE -ne 0) { throw 'Native Windows test failed' }
+          if ($LASTEXITCODE -ne 0) {
+            $errorReport = Join-Path $env:WFM_DATA_DIR 'selftest-error.txt'
+            if (Test-Path -LiteralPath $errorReport) { Get-Content -LiteralPath $errorReport }
+            throw 'Native Windows test failed'
+          }
           Get-Content "$env:WFM_DATA_DIR/selftest.json"
       - uses: actions/upload-artifact@v4
         with:
