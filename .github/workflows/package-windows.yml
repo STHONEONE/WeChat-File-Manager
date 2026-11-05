@@ -1,0 +1,85 @@
+name: Windows portable package
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/package-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install locked dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements-lock.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+
+      - name: Run regression tests
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .tmp | Out-Null
+          python -m pytest -q --basetemp .tmp/package-tests
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+
+      - name: Build Windows onedir EXE
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean package.spec
+          if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed' }
+          Copy-Item README.md dist/WeChatFileManager/README.md
+          Copy-Item LICENSE dist/WeChatFileManager/LICENSE
+          if (-not (Test-Path dist/WeChatFileManager/WeChatFileManager.exe)) { throw 'EXE missing' }
+          $qtPdf = Get-ChildItem -Path dist/WeChatFileManager -Recurse -Filter Qt6Pdf.dll -ErrorAction SilentlyContinue
+          if (-not $qtPdf) { throw 'Qt6Pdf.dll missing; PDF preview would fail in packaged build' }
+
+      - name: Smoke-test bundled EXE on native Windows
+        shell: pwsh
+        run: |
+          $env:WFM_DATA_DIR = Join-Path $PWD '.tmp/package-smoke'
+          $env:QT_QPA_PLATFORM = 'windows'
+          New-Item -ItemType Directory -Force -Path $env:WFM_DATA_DIR | Out-Null
+          & .\dist\WeChatFileManager\WeChatFileManager.exe --self-test
+          if ($LASTEXITCODE -ne 0) {
+            $errorReport = Join-Path $env:WFM_DATA_DIR 'selftest-error.txt'
+            if (Test-Path $errorReport) { Get-Content $errorReport }
+            throw 'Packaged EXE native self-test failed'
+          }
+          if (-not (Test-Path (Join-Path $env:WFM_DATA_DIR 'selftest.json'))) {
+            throw 'Packaged EXE did not emit self-test result'
+          }
+          Get-Content (Join-Path $env:WFM_DATA_DIR 'selftest.json')
+
+      - name: Create ZIP and SHA-256 checksum
+        shell: pwsh
+        run: |
+          $zip = '.tmp/WeChatFileManager-v1.4.0-Windows-x64.zip'
+          Compress-Archive -Path 'dist/WeChatFileManager' -DestinationPath $zip -Force
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash
+          "$hash  WeChatFileManager-v1.4.0-Windows-x64.zip" | Set-Content -Encoding ascii '.tmp/SHA256SUMS.txt'
+          Write-Host "SHA256 $hash"
+          Write-Host "ZIP size: $((Get-Item $zip).Length) bytes"
+
+      - name: Upload downloadable Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeChatFileManager-v1.4.0-Windows-x64
+          path: |
+            .tmp/WeChatFileManager-v1.4.0-Windows-x64.zip
+            .tmp/SHA256SUMS.txt
+          retention-days: 30
+          compression-level: 0
+          if-no-files-found: error
