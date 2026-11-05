@@ -52,8 +52,11 @@ jobs:
           $env:WFM_DATA_DIR = Join-Path $PWD '.tmp/package-smoke'
           $env:QT_QPA_PLATFORM = 'windows'
           New-Item -ItemType Directory -Force -Path $env:WFM_DATA_DIR | Out-Null
-          & .\dist\WeChatFileManager\WeChatFileManager.exe --self-test
-          if ($LASTEXITCODE -ne 0) {
+          # A GUI-subsystem EXE can be launched asynchronously by pwsh's call operator.
+          # Start-Process -Wait ensures the native self-test completed before checking its exit code.
+          $exe = (Resolve-Path '.\dist\WeChatFileManager\WeChatFileManager.exe').Path
+          $process = Start-Process -FilePath $exe -ArgumentList '--self-test' -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
             $errorReport = Join-Path $env:WFM_DATA_DIR 'selftest-error.txt'
             if (Test-Path $errorReport) { Get-Content $errorReport }
             throw 'Packaged EXE native self-test failed'
