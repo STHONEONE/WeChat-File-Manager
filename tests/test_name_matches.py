@@ -77,7 +77,11 @@ def test_sidebar_previews_and_only_checked_files_enter_recycle(tmp_path, monkeyp
     wait_for(app, lambda: page.preview_image is not None)
     page.groups.setCurrentItem(nodes[picture.name])
     wait_for(app, lambda: page.preview_image is not None)
-    nodes[picture.name].setCheckState(0, Qt.CheckState.Checked)
+    group.setCheckState(0,Qt.CheckState.Checked)
+    assert len(page.checked)==3
+    nodes[original.name].setCheckState(0,Qt.CheckState.Unchecked)
+    nodes[pdf_path.name].setCheckState(0,Qt.CheckState.Unchecked)
+    assert group.checkState(0)==Qt.CheckState.PartiallyChecked
     assert list(page.checked) == [canonical(picture)]
     results = []
     window.delete_done = results.append
@@ -85,10 +89,9 @@ def test_sidebar_previews_and_only_checked_files_enter_recycle(tmp_path, monkeyp
     def confirm(dialog):
         assert [item.path for item in dialog.plan.items] == [canonical(picture)]
         assert dialog.plan.items[0].allowed
-        dialog.selected_ack.setChecked(True)
-        dialog.original_ack.setChecked(True)
         assert dialog.confirm.isEnabled()
-        return QDialog.DialogCode.Accepted
+        dialog.confirm.click()
+        return dialog.result()
 
     monkeypatch.setattr(DeleteDialog, 'exec', confirm)
     page.recycle_button.click()
@@ -113,3 +116,28 @@ def test_changed_file_after_name_lookup_is_rejected(tmp_path):
     assert not plan.items[0].allowed
     assert service.execute(plan, True, True)['skipped'] == 1
     assert original.read_bytes() == b'replaced after checking'
+
+
+def test_group_checkbox_covers_unexpanded_and_paginated_members(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    store, folder = fixture(tmp_path)
+    rows = [dict(path=canonical(folder/f'项目说明-{i}.txt'),account=canonical(folder.parents[1]),
+                 name=f'项目说明-{i}.txt',size=1) for i in range(155)]
+    blocked = dict(rows[0], path=canonical(folder/'protected.dat'),name='protected.dat')
+    window = Window(store,auto=False)
+    window.show_duplicates()
+    page = window.duplicate_dialog
+    page.set_results([[rows[0],rows[1]],[*rows,blocked]],'演示')
+    first,second=(page.groups.topLevelItem(i) for i in range(2))
+    assert second.childCount()==0
+    second.setCheckState(0,Qt.CheckState.Checked)
+    assert len(page.checked)==155 and blocked['path'] not in page.checked
+    assert first.checkState(0)==Qt.CheckState.Checked
+    first.child(0).setCheckState(0,Qt.CheckState.Unchecked)
+    assert second.checkState(0)==Qt.CheckState.PartiallyChecked
+    second.setExpanded(True)
+    page.load_members(second)
+    assert second.child(154).checkState(0)==Qt.CheckState.Checked
+    page.clear_selection()
+    assert not page.checked and second.checkState(0)==Qt.CheckState.Unchecked
+    window.close()

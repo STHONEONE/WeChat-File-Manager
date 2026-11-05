@@ -1,5 +1,43 @@
-from PySide6.QtCore import QDate,Signal
-from PySide6.QtWidgets import QWidget,QHBoxLayout,QCheckBox,QDateEdit,QDialog,QVBoxLayout,QListWidget,QPushButton,QInputDialog,QMessageBox
+from PySide6.QtCore import QDate,Signal,Qt
+from PySide6.QtWidgets import QWidget,QHBoxLayout,QCheckBox,QDateEdit,QDialog,QVBoxLayout,QListWidget,QPushButton,QInputDialog,QMessageBox,QLabel,QPlainTextEdit
+
+
+class ScanIssueDialog(QDialog):
+    def __init__(self,title,summary,errors,parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        available=(parent or self).screen().availableGeometry()
+        self.setFixedWidth(min(480,available.width()-32))
+        layout=QVBoxLayout(self)
+        message=QLabel(summary)
+        message.setTextFormat(Qt.TextFormat.PlainText)
+        message.setWordWrap(True)
+        layout.addWidget(message)
+        self.details=QPlainTextEdit()
+        self.details.setAccessibleName('扫描异常详情')
+        self.details.setReadOnly(True)
+        self.details.setPlainText('\n\n'.join(errors))
+        self.details.setFixedHeight(min(200,max(72,available.height()//2-35)))
+        layout.addWidget(self.details)
+        self.details.hide()
+        actions=QHBoxLayout()
+        layout.addLayout(actions)
+        self.toggle_button=QPushButton('查看详情')
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setAutoDefault(False)
+        self.toggle_button.toggled.connect(self.toggle_details)
+        actions.addWidget(self.toggle_button)
+        actions.addStretch()
+        close=QPushButton('关闭')
+        close.setDefault(True)
+        close.clicked.connect(self.accept)
+        actions.addWidget(close)
+        self.adjustSize()
+
+    def toggle_details(self,show):
+        self.details.setVisible(show)
+        self.toggle_button.setText('收起详情' if show else '查看详情')
+        self.adjustSize()
 
 class DateFilter(QWidget):
     textChanged=Signal(str)

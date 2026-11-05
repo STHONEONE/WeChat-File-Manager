@@ -20,8 +20,8 @@ class Worker(QThread):
         except Exception as e: self.done.emit({'error':str(e)})
 
 from app.ui.file_model import FilesModel
-from app.ui.dialogs import DateFilter,TagDialog
-from app.ui.preview import PreviewController
+from app.ui.dialogs import DateFilter,TagDialog,ScanIssueDialog
+from app.ui.preview import PreviewController,supports_preview
 from app.ui.duplicates import NameMatchesPage
 from app.ui.statistics_view import StatisticsDialog
 from app.file_monitor import FileMonitor
@@ -118,6 +118,7 @@ class Window(QMainWindow):
         self.table=QTableView(); self.table.setModel(self.proxy); self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows); self.table.setSelectionMode(QTableView.SelectionMode.ExtendedSelection); self.table.setSortingEnabled(True); self.table.setAlternatingRowColors(True); self.table.verticalHeader().hide(); self.table.setColumnWidth(0,255); self.table.setColumnWidth(1,70); self.table.setColumnWidth(2,82); self.table.setColumnWidth(3,145); splitter.addWidget(self.table)
         detail=QWidget(); form=QVBoxLayout(detail); self.info=QLabel('选择文件查看详情'); self.info.setWordWrap(True); self.info.setTextFormat(Qt.TextFormat.PlainText); self.info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse); form.addWidget(self.info)
         self.preview=QLabel('图片预览'); self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.preview.setMinimumHeight(130); form.addWidget(self.preview);self.preview.hide()
+        self.preview_text=QTextEdit();self.preview_text.setReadOnly(True);self.preview_text.setFixedHeight(130);form.addWidget(self.preview_text);self.preview_text.hide()
         self.preview_controller=PreviewController(self);self.preview_controller.ready.connect(self.preview_ready);self.preview_image=None
         self.path=QTextEdit(); self.path.setReadOnly(True); self.path.setFixedHeight(65); form.addWidget(self.path)
         form.addWidget(QLabel('备注')); self.note=QTextEdit(); self.note.setFixedHeight(82); form.addWidget(self.note)
@@ -424,7 +425,7 @@ class Window(QMainWindow):
         page=self.store.search_page(order=self.sort_order,descending=self.sort_desc,**filters)
         rows=page.rows
         self.preview_controller.clear();self.preview_image=None
-        self.preview.hide()
+        self.preview.hide();self.preview_text.hide()
         self.active=None; self.model.configure(self.store,filters,self.sort_order,self.sort_desc,page); self.info.setText('选择文件查看详情'); self.path.clear(); self.note.clear(); self.tags.clear(); self.preview.clear(); self.favorite.setChecked(False)
         if self.model.checkable:self.model.clear_checks()
         d=self.directory_data.get(nav.get('directory'))
@@ -466,13 +467,18 @@ class Window(QMainWindow):
         if not selected:return
         r=selected[0]; self.active=r;self.active_directory=None;self.detail_stack.setCurrentIndex(0); self.info.setText(f'{r["name"]}\n{r["category"]} · {human(r["size"])}\n账号：{r["account_name"]}'+('\n文件已不存在' if r['missing'] else '')); self.path.setPlainText(r['path']); self.note.setPlainText(r['note']); self.tags.setText(r['tags']); self.favorite.setChecked(bool(r['favorite'])); self.preview.clear()
         self.preview_controller.clear();self.preview_image=None
-        self.preview.setVisible(r['category']=='图片' and not r['missing'])
-        if r['category']=='图片' and not r['missing']:
-            self.preview.setText('正在生成预览…');self.preview_controller.request(r['path'],r['size'])
+        self.preview_text.hide()
+        can_preview=not r['missing'] and supports_preview(r['path'],r['category'])
+        self.preview.setVisible(can_preview)
+        if can_preview:
+            self.preview.setText('正在生成预览…');self.preview_controller.request_file(r['path'],r['size'],r['category'])
         else:self.preview.setText('使用系统关联程序打开；加密附件仅显示元数据')
         self.edit_changed()
 
     def preview_ready(self,img,message):
+        if isinstance(img,str):
+            self.preview_image=None;self.preview.hide();self.preview_text.setPlainText(img);self.preview_text.show()
+            return
         self.preview_image=img
         if message:self.preview.setText(message)
         elif img is not None:self.preview.setPixmap(QPixmap.fromImage(img).scaled(max(self.preview.width()-8,1),max(self.preview.height()-8,1),Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
@@ -569,11 +575,15 @@ class Window(QMainWindow):
         self.rebuild_tree()
         if 'error' in out:
             self.invalidate_duplicates()
-            self.store.set_setting('state:scan',{'complete':False,'running':False,'errors':[out['error']]});QMessageBox.warning(self,'扫描失败',out['error']); return
+            self.store.set_setting('state:scan',{'complete':False,'running':False,'errors':[out['error']]})
+            ScanIssueDialog('扫描失败','扫描未完成。可展开详情查看原因。',[out['error']],self).exec()
+            return
         r=out['result']; self.statusBar().showMessage(f'扫描'+('已停止' if r['cancelled'] else '完成')+f'：{r["files"]:,} 个可管理文件；{len(r["errors"])} 个访问异常')
         self.refresh_duplicate_validity(r)
         self.progress_label.setText(f'扫描'+('已取消' if r['cancelled'] else '完成')+f'；{r["files"]:,} 个可管理文件；{len(r["errors"])} 个访问异常')
-        if r['errors']:QMessageBox.warning(self,'部分目录无法读取','已保留未能完整扫描账号的旧文件状态。\n'+'\n'.join(r['errors'][:15]))
+        if r['errors']:
+            summary=f'扫描发现 {len(r["errors"]):,} 项访问异常。未能完整扫描的账号保留旧索引。'
+            ScanIssueDialog('部分目录无法读取',summary,r['errors'],self).exec()
         if self.store.setting('monitor:enabled',False):
             expected={a['path'] for a in self.store.accounts()}
             if not self.monitor or set(getattr(self.monitor,'roots',[]))!=expected:self.restart_monitor()
@@ -785,10 +795,9 @@ class Window(QMainWindow):
             self.start_worker(lambda progress:self.delete_service.execute(plan,confirmed=False),
                               lambda result:self.update_progress(result.get('error','已取消，没有删除文件。')))
             return
-        original_ack=dialog.original_ack.isChecked()
         excluded=dialog.excluded_paths()
         self.task_kind='delete'
-        self.start_worker(lambda progress:self.delete_service.execute(plan,True,original_ack,lambda:QThread.currentThread().isInterruptionRequested(),progress,excluded),self.delete_done,True)
+        self.start_worker(lambda progress:self.delete_service.execute(plan,True,True,lambda:QThread.currentThread().isInterruptionRequested(),progress,excluded),self.delete_done,True)
 
     def delete_done(self,out):
         if 'error' in out:QMessageBox.warning(self,'处理异常','请核对删除记录与回收站：\n'+out['error']);return
@@ -796,8 +805,18 @@ class Window(QMainWindow):
         self.refresh_deleted_counts([row['path'] for row in r['items'] if row['result'] in {'success','uncertain'}])
         if r['success'] or r['uncertain']:self.invalidate_duplicates()
         if self.statistics_dialog:self.statistics_dialog.refresh()
-        report=QDialog(self);report.setWindowTitle('清理操作完成');report.resize(490,210);layout=QVBoxLayout(report)
-        summary=QLabel(f'已移入回收站 {r["success"]} 个文件\n失败 {r["failed"]} · 跳过 {r["skipped"]} · 取消 {r["cancelled"]} · 待核对 {r["uncertain"]}\n回收站接收容量 {human(r["recycled_bytes"])}，实际释放空间以系统为准。')
+        issues=[row for row in r['items'] if row['result'] in {'failed','skipped','uncertain'} and not row.get('excluded')]
+        status=f'已移入回收站 {r["success"]} 个文件'
+        if r['cancelled']:status+=f' · 已取消 {r["cancelled"]} 项'
+        if issues:status+=f' · {len(issues)} 项未完成或需核对'
+        self.update_progress(status)
+        if not issues:
+            if r['success']:QMessageBox.information(self,'清理完成',status)
+            return
+        report=QDialog(self);report.setWindowTitle('有文件未能确认回收');report.resize(490,210);layout=QVBoxLayout(report)
+        details='\n'.join(f'{Path(row["path"]).name}：{row["reason"]}' for row in issues[:4])
+        summary=QLabel(f'{status}\n\n{details}')
+        summary.setTextFormat(Qt.TextFormat.PlainText)
         summary.setWordWrap(True);layout.addWidget(summary,1)
         actions=QHBoxLayout();layout.addLayout(actions)
         self.button(actions,'查看处理记录',self.show_history)

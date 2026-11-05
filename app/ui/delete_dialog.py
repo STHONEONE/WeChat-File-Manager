@@ -1,7 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 from PySide6.QtCore import Qt,QAbstractTableModel,QModelIndex,Signal
-from PySide6.QtWidgets import QDialog,QVBoxLayout,QLabel,QTreeWidget,QTreeWidgetItem,QCheckBox,QDialogButtonBox,QPushButton,QTableView,QPlainTextEdit
+from PySide6.QtWidgets import QDialog,QVBoxLayout,QLabel,QTreeWidget,QTreeWidgetItem,QDialogButtonBox,QPushButton,QTableView,QPlainTextEdit
 from app.paths import human
 
 RESULT_LABELS={'pending':'执行中 / 待核对','success':'已移入回收站','failed':'失败','skipped':'跳过','cancelled':'已取消','uncertain':'需核对回收站'}
@@ -78,20 +78,19 @@ class DeleteDialog(QDialog):
         layout.addWidget(self.paths)
         self.list.selectionModel().currentChanged.connect(self.show_paths)
         if plan.items:self.list.setCurrentIndex(self.preview_model.index(0,0))
-        self.selected_ack=QCheckBox('我确认仅处理以上清单中的文件。');layout.addWidget(self.selected_ack)
-        warning=QLabel('这些是微信管理的原始文件，不同聊天可能分别引用各路径。内容相同也不表示可以安全删除其他路径；移入回收站后，微信可能无法打开对应附件。');warning.setWordWrap(True);layout.addWidget(warning)
-        self.original_ack=QCheckBox('我已了解路径引用风险，确认移入回收站。')
-        self.original_ack.setStyleSheet('QCheckBox { color:#9b4025; }');layout.addWidget(self.original_ack)
-        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel);self.confirm=buttons.button(QDialogButtonBox.StandardButton.Ok);self.confirm.setText('仅移入回收站');self.confirm.setEnabled(False);layout.addWidget(buttons)
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
+        warning=QLabel('移入回收站后，微信可能无法打开对应聊天附件。请核对勾选的文件。')
+        warning.setWordWrap(True);layout.addWidget(warning)
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel);self.confirm=buttons.button(QDialogButtonBox.StandardButton.Ok);self.confirm.setText('移入回收站');self.confirm.setProperty('kind','danger');layout.addWidget(buttons)
+        cancel=buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        cancel.setText('取消');cancel.setDefault(True);cancel.setFocus()
+        self.confirm.setAutoDefault(False)
         buttons.accepted.connect(self.accept);buttons.rejected.connect(self.reject)
         accounts=sorted({item.account_name for item in plan.items})
         account_text='、'.join(accounts[:4])
         if len(accounts)>4:account_text+=f' 等 {len(accounts)} 个账号'
         def changed():
             summary.setText(f'计划 {len(plan.items):,} 项 · 已勾选 {self.preview_model.count:,} 项 · 预计接收 {human(self.preview_model.size)}\n涉及账号 {account_text}。可在列表中取消个别勾选。')
-            self.confirm.setEnabled(bool(self.preview_model.count) and self.selected_ack.isChecked() and self.original_ack.isChecked())
-        self.selected_ack.toggled.connect(changed);self.original_ack.toggled.connect(changed)
+            self.confirm.setEnabled(bool(self.preview_model.count))
         self.preview_model.changed.connect(changed)
         changed()
 

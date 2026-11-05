@@ -177,7 +177,7 @@ class DeleteService:
                         reason+=' 原路径已不存在但 Shell 未确认，请核对回收站；不宣称可自动恢复。'
                         self.store.update_paths([item.path])
             self._log(plan,item,status,reason,log_id)
-            results.append({'path':item.path,'size':item.size,'result':status,'reason':reason})
+            results.append({'path':item.path,'size':item.size,'result':status,'reason':reason,'excluded':item.path in excluded})
             if number%20==0 or number==len(plan.items):
                 progress(f'回收站处理 {number}/{len(plan.items)}')
         return {'items':results,'success':sum(r['result']=='success' for r in results),'failed':sum(r['result']=='failed' for r in results),

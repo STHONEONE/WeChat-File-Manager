@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHeaderView, QHBoxLayout, Q
 
 from app.directory_mapper import deletion_path_allowed
 from app.paths import human
-from app.ui.preview import PreviewController
+from app.ui.preview import PreviewController,supports_preview
 
 
 def locate(path):
@@ -33,6 +33,8 @@ class NameMatchesPage(QWidget):
         super().__init__(parent)
         self.matches = []
         self.visible_members = {}
+        self.group_files = {}
+        self.groups_by_path = {}
         self.checked = {}
         self.checked_size = 0
         self.current_row = None
@@ -130,6 +132,8 @@ class NameMatchesPage(QWidget):
         self.summary.setText(summary)
         self.groups.clear()
         self.visible_members.clear()
+        self.group_files.clear()
+        self.groups_by_path.clear()
         self.clear_selection()
         self.show_current(None)
         self.load_groups()
@@ -142,11 +146,21 @@ class NameMatchesPage(QWidget):
 
     def load_groups(self):
         offset = self.groups.topLevelItemCount()
-        for rows in self.matches[offset:offset + 150]:
-            group = QTreeWidgetItem(self.groups, [f'{rows[0]["name"]} · {len(rows):,} 个文件',
-                                                 human(sum(row['size'] for row in rows))])
-            group.setData(0, self.role, rows)
-            group.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+        with QSignalBlocker(self.groups):
+            for rows in self.matches[offset:offset + 150]:
+                group = QTreeWidgetItem(self.groups, [f'{rows[0]["name"]} · {len(rows):,} 个文件',
+                                                     human(sum(row['size'] for row in rows))])
+                group.setData(0, self.role, rows)
+                group.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+                eligible = {row['path']:row for row in rows if deletion_path_allowed(row['path'],row['account'])}
+                self.group_files[group] = eligible
+                for path in eligible:
+                    self.groups_by_path.setdefault(path,set()).add(group)
+                if eligible:
+                    group.setToolTip(0,'勾选整组可处理文件；展开后可取消勾选要保留的文件。')
+                    self.update_group_check(group)
+                else:
+                    group.setFlags(group.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
         self.more_button.setVisible(self.groups.topLevelItemCount() < len(self.matches))
 
     def expand_group(self, item):
@@ -175,29 +189,52 @@ class NameMatchesPage(QWidget):
                 QTreeWidgetItem(group, ['双击加载本组更多文件…'])
 
     def check_changed(self, item, column):
-        row = item.data(0, self.role) if item.parent() and column == 0 else None
-        if not row or not deletion_path_allowed(row['path'], row['account']):
+        if column != 0:
             return
-        path = row['path']
-        state = item.checkState(0)
-        if state == Qt.CheckState.Checked and path not in self.checked:
-            self.checked[path] = row
-            self.checked_size += row['size']
-        elif state != Qt.CheckState.Checked and path in self.checked:
-            self.checked_size -= self.checked.pop(path)['size']
+        parent = item.parent()
+        if parent is None:
+            rows = self.group_files.get(item, {}).values()
+        else:
+            row = item.data(0,self.role)
+            if not row or row['path'] not in self.group_files.get(parent,{}):
+                return
+            rows = (row,)
+        checked = item.checkState(0) == Qt.CheckState.Checked
+        affected = set()
         with QSignalBlocker(self.groups):
-            for other in self.visible_members[path]:
-                if other is not item:
-                    other.setCheckState(0, state)
+            for row in rows:
+                path = row['path']
+                if checked and path not in self.checked:
+                    self.checked[path] = row
+                    self.checked_size += row['size']
+                elif not checked and path in self.checked:
+                    self.checked_size -= self.checked.pop(path)['size']
+                for member in self.visible_members.get(path,()):
+                    member.setCheckState(0,Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+                affected.update(self.groups_by_path[path])
+            for group in affected:
+                self.update_group_check(group)
         self.update_selection()
 
+    def update_group_check(self, group):
+        paths = self.group_files[group]
+        count = sum(path in self.checked for path in paths)
+        state = (Qt.CheckState.Unchecked if not count else
+                 Qt.CheckState.Checked if count==len(paths) else Qt.CheckState.PartiallyChecked)
+        group.setCheckState(0,state)
+
     def clear_selection(self):
-        with QSignalBlocker(self.groups):
-            for path in self.checked:
-                for item in self.visible_members.get(path, ()):
-                    item.setCheckState(0, Qt.CheckState.Unchecked)
+        paths = tuple(self.checked)
         self.checked.clear()
         self.checked_size = 0
+        with QSignalBlocker(self.groups):
+            groups = set()
+            for path in paths:
+                for item in self.visible_members.get(path, ()):
+                    item.setCheckState(0, Qt.CheckState.Unchecked)
+                groups.update(self.groups_by_path.get(path,()))
+            for group in groups:
+                self.update_group_check(group)
         self.update_selection()
 
     def update_selection(self):
@@ -227,9 +264,11 @@ class NameMatchesPage(QWidget):
             return
         self.details.setText(f'{row["name"]}\n{row["account_name"]} · {human(row["size"])}')
         extension = Path(row['name']).suffix.lower()
-        if row['category'] == '图片' or extension in {'.pdf', '.txt', '.md', '.csv'}:
+        if supports_preview(row['path'],row['category']):
             self.preview.setText('正在读取预览…')
-            self.decoder.request(row['path'], row['size'], documents=True)
+            self.decoder.request_file(row['path'],row['size'],row['category'])
+        elif extension in {'.doc','.xls','.ppt'}:
+            self.preview.setText('旧版 Office 格式，请点击「打开文件」。')
         else:
             self.preview.setText('点击下方「打开文件」查看内容。')
 
