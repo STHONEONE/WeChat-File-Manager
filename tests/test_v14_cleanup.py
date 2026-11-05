@@ -1,19 +1,17 @@
 import os
-import time
 from pathlib import Path
 
 import pytest
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication,QDialog
+from PySide6.QtWidgets import QApplication
 
 from app.cleanup_selection import build_selection
 from app.core import Store, canonical
 from app.delete_service import DeleteService
 from app.duplicate_detector import HashCancelled
 from app.ui.delete_dialog import DeleteDialog
-from app.ui.window import Window
 from tests.test_deletion import FakeRecycle
 
 
@@ -35,40 +33,14 @@ def build_fixture(tmp_path, groups, copies=2, large_group=0):
     return store, first, second, DeleteService(store, backend, 0)
 
 
-def test_global_suggestions_span_both_paginated_lists(tmp_path):
-    app = QApplication.instance() or QApplication([])
+def test_global_suggestions_span_more_than_one_group_and_member_page(tmp_path):
     store, first, second, service = build_fixture(tmp_path, 201, large_group=202)
     preferred = canonical(second / 'group-000-201.txt')
     store.annotate(preferred, '保留这份', '', True)
-    window = Window(store, auto=False)
-    window.delete_service = service
-    window.show_duplicates()
-    page = window.duplicate_dialog
     draft = build_selection(service, lambda: False, lambda _: None)
-    page.apply_suggestions(draft)
-    assert page.groups.topLevelItemCount() == 200
-    assert len(draft.keepers) == 201 and len(page.checked) == 401
-    assert sum(row['size'] for row in page.checked.values()) == 1604
-    assert preferred not in page.checked
-    page.groups.setCurrentItem(page.groups.topLevelItem(0))
-    group = page.group_key()
-    assert draft.keepers[group] == preferred and len(page.model.rows) == 200
-    page.load_members()
-    assert len(page.model.rows) == 202 and len(page.model.checked_rows()) == 201
-    page.members.selectRow(0)
-    new_keeper = page.selected()[0]['path']
-    page.set_keeper()
-    assert draft.keepers[group] == new_keeper and preferred in page.checked
-    page.load_groups()
-    page.groups.setCurrentItem(page.groups.topLevelItem(200))
-    page.model.setData(page.model.index(1, 0), Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
-    window.switch_page('search')
-    window.show_duplicates()
-    assert len(page.checked) == 400 and page.groups.currentItem() == page.groups.topLevelItem(200)
-    assert not page.model.checked_rows()
-    page.clear_selection()
-    assert not page.checked and not page.recycle.isEnabled()
-    window.close()
+    assert len(draft.keepers) == 201 and len(draft.suggestions()) == 401
+    assert sum(row['size'] for row in draft.suggestions().values()) == 1604
+    assert preferred in draft.keepers.values() and preferred not in draft.suggestions()
 
 
 def test_preview_cancellation_and_exact_execution_subset(tmp_path):
@@ -113,45 +85,3 @@ def test_incomplete_cancelled_and_unavailable_suggestions(tmp_path):
     store.set_setting('state:duplicates', {'complete': False})
     with pytest.raises(ValueError, match='完成重复文件检测'):
         build_selection(service, lambda: False, lambda _: None)
-
-
-def test_duplicate_page_buttons_use_background_preview_and_confirm(tmp_path,monkeypatch):
-    app=QApplication.instance() or QApplication([])
-    store,first,second,service=build_fixture(tmp_path,2,copies=3)
-    window=Window(store,auto=False)
-    window.delete_service=service
-    window.show_duplicates()
-    page=window.duplicate_dialog
-    results=[]
-    window.delete_done=results.append
-
-    def wait_for(predicate):
-        deadline=time.monotonic()+8
-        while not predicate() and time.monotonic()<deadline:
-            app.processEvents()
-            time.sleep(.01)
-        assert predicate()
-
-    def confirm(dialog):
-        assert dialog.preview_model.count==4
-        index=dialog.preview_model.index(0,0)
-        dialog.preview_model.setData(index,Qt.CheckState.Unchecked,Qt.ItemDataRole.CheckStateRole)
-        dialog.selected_ack.setChecked(True)
-        dialog.original_ack.setChecked(True)
-        assert dialog.confirm.isEnabled()
-        return QDialog.DialogCode.Accepted
-
-    monkeypatch.setattr(DeleteDialog,'exec',confirm)
-    page.suggest.click()
-    wait_for(lambda:len(page.checked)==4 and not window.worker.isRunning())
-    assert not service.backend.calls
-    window.monitor_updated({'result':{'changed':0,'deleted':0,'errors':[]}})
-    assert len(page.checked)==4
-    first_checked=next(iter(page.checked))
-    page.recycle.click()
-    wait_for(lambda:bool(results) and not window.worker.isRunning())
-    assert results[0]['result']['success']==3 and Path(first_checked).exists()
-    assert first_checked not in service.backend.calls
-    window.monitor_updated({'result':{'changed':1}})
-    assert not page.checked and not page.suggest.isEnabled()
-    window.close()

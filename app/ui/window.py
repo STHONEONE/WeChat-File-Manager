@@ -22,13 +22,15 @@ class Worker(QThread):
 from app.ui.file_model import FilesModel
 from app.ui.dialogs import DateFilter,TagDialog
 from app.ui.preview import PreviewController
-from app.ui.duplicates import DuplicatesDialog
+from app.ui.duplicates import NameMatchesPage
 from app.ui.statistics_view import StatisticsDialog
 from app.file_monitor import FileMonitor
 from app.directory_mapper import describe_directory,virtual_sections
 from app.delete_service import DeleteService
 from app.ui.delete_dialog import DeleteDialog,DeleteHistoryDialog
-from app.cleanup_selection import build_selection
+from app.duplicate_detector import HashCancelled
+from app.name_matches import name_groups
+from app.snapshots import indexed_signature
 from app.ui.styles import WINDOW_STYLE
 
 class MonitorSignals(QObject):
@@ -55,7 +57,7 @@ class Window(QMainWindow):
         sidebar=QVBoxLayout(); body.addLayout(sidebar)
         self.nav_buttons={}
         for key,label,icon in [('directory','微信目录',QStyle.StandardPixmap.SP_DirIcon),
-                               ('duplicates','重复文件',QStyle.StandardPixmap.SP_FileDialogDetailedView),
+                               ('duplicates','相近名称',QStyle.StandardPixmap.SP_FileDialogDetailedView),
                                ('search','查找文件',QStyle.StandardPixmap.SP_FileDialogContentsView)]:
             button=self.button(sidebar,label,lambda checked=False,k=key:self.switch_page(k))
             button.setProperty('nav',True);button.setCheckable(True);button.setIcon(self.style().standardIcon(icon))
@@ -91,6 +93,8 @@ class Window(QMainWindow):
         row.addStretch()
         self.details_button=self.button(row,'详情',lambda:self.detail_scroll.setVisible(self.details_button.isChecked()))
         self.details_button.setCheckable(True)
+        self.edit_selection_button=self.button(row,'编辑选择',self.edit_file_selection)
+        self.edit_selection_button.setCheckable(True)
         self.filters=QWidget();browser_layout.addWidget(self.filters)
         filters=QGridLayout(self.filters);filters.setContentsMargins(0,0,0,0)
         self.start=DateFilter('起始日期')
@@ -134,6 +138,15 @@ class Window(QMainWindow):
         self.detail_scroll.setWidget(self.detail_stack);splitter.addWidget(self.detail_scroll)
         self.table.setMinimumHeight(55)
         splitter.setChildrenCollapsible(False);splitter.setSizes([200,620,280])
+        self.selection_bar=QWidget();browser_layout.addWidget(self.selection_bar)
+        selection_layout=QHBoxLayout(self.selection_bar)
+        selection_layout.setContentsMargins(0,0,0,0)
+        self.selection_count=QLabel();selection_layout.addWidget(self.selection_count,1)
+        self.clear_checks_button=self.button(selection_layout,'清空勾选',self.model.clear_checks)
+        self.recycle_checked_button=self.button(selection_layout,'预览删除',self.preview_checked_files)
+        self.recycle_checked_button.setProperty('kind','danger')
+        self.model.checksChanged.connect(self.update_file_selection)
+        self.selection_bar.hide()
         self.tree.itemSelectionChanged.connect(self.nav_changed); self.tree.itemDoubleClicked.connect(self.alias_dialog)
         self.table.selectionModel().selectionChanged.connect(self.selection_changed); self.table.doubleClicked.connect(lambda _:self.open_file())
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu); self.table.customContextMenuRequested.connect(self.context_menu)
@@ -146,6 +159,7 @@ class Window(QMainWindow):
         self.directory_mode.currentIndexChanged.connect(self.change_directory_view)
         self.delete_service=DeleteService(self.store)
         self.monitor=None;self.duplicate_dialog=None;self.statistics_dialog=None;self.task_kind=''
+        self.duplicate_revision=0
         self.monitor_signals=MonitorSignals(self);self.monitor_signals.updated.connect(self.monitor_updated);self.monitor_signals.status.connect(self.monitor_status)
         self.monitor_label=QLabel('空闲 · 自动监控未开启');self.monitor_label.setMaximumWidth(480);self.monitor_label.setTextFormat(Qt.TextFormat.PlainText);self.statusBar().addPermanentWidget(self.monitor_label)
         self.page='directory';self.update_accounts(); self.rebuild_tree();self.switch_page('directory')
@@ -154,11 +168,28 @@ class Window(QMainWindow):
     def button(self,layout,text,fn):
         b=QPushButton(text); b.clicked.connect(fn); layout.addWidget(b); return b
 
+    def edit_file_selection(self,enabled):
+        self.model.set_checkable(enabled)
+        self.edit_selection_button.setText('完成选择' if enabled else '编辑选择')
+        self.selection_bar.setVisible(enabled)
+
+    def update_file_selection(self):
+        count=len(self.model.checked_paths)
+        self.selection_count.setText(f'已勾选 {count:,} 个文件')
+        self.clear_checks_button.setEnabled(count>0)
+        self.recycle_checked_button.setEnabled(count>0 and not (self.worker and self.worker.isRunning()))
+
+    def preview_checked_files(self):
+        self.delete_paths([row['path'] for row in self.model.checked_rows()])
+
     def switch_page(self,page):
         old=self.page
         if old!=page and not self.confirm_pending():
             for key,button in self.nav_buttons.items():button.setChecked(key==old)
             return False
+        if old!=page and self.edit_selection_button.isChecked():
+            self.edit_selection_button.setChecked(False)
+            self.edit_file_selection(False)
         self.page=page
         for key,button in self.nav_buttons.items():button.setChecked(key==page)
         self.account.setVisible(page!='duplicates')
@@ -225,7 +256,7 @@ class Window(QMainWindow):
         all_item=item(self.tree,f'全部文件 ({sum(c["count"] for c in counts.values()):,})',{})
         item(self.tree,'最近文件（7 天）',{'recent':True})
         smart=item(self.tree,'智能管理',{})
-        item(smart,'重复文件',{'duplicates':True});item(smart,'大文件',{'large':True});item(smart,'存储统计',{'statistics':True});smart.setExpanded(True)
+        item(smart,'相近名称',{'duplicates':True});item(smart,'大文件',{'large':True});item(smart,'存储统计',{'statistics':True});smart.setExpanded(True)
         for cat in [*CATEGORIES,'其他文件']: item(self.tree,f'{cat} ({counts.get(cat,{}).get("count",0):,})',{'category':cat})
         item(self.tree,'★ 收藏',{'favorite':True})
         tag_root=item(self.tree,'我的标签（双击管理）',{'tags_view':True})
@@ -395,6 +426,7 @@ class Window(QMainWindow):
         self.preview_controller.clear();self.preview_image=None
         self.preview.hide()
         self.active=None; self.model.configure(self.store,filters,self.sort_order,self.sort_desc,page); self.info.setText('选择文件查看详情'); self.path.clear(); self.note.clear(); self.tags.clear(); self.preview.clear(); self.favorite.setChecked(False)
+        if self.model.checkable:self.model.clear_checks()
         d=self.directory_data.get(nav.get('directory'))
         text=f'共 {page.total:,} 个可管理文件 · {human(page.size)} · 首批 {len(rows)} 个，向下滚动加载更多'
         if d:text+=f' | 原目录含内部数据：{d["count"]:,} 个文件 / {human(d["size"])}'
@@ -520,11 +552,12 @@ class Window(QMainWindow):
         self.progress_bar.show()
         self.worker=Worker(fn); self.worker.progress.connect(self.update_progress)
         self.worker.done.connect(done); self.worker.finished.connect(self.task_finished); self.worker.start()
+        self.update_file_selection()
 
     def update_progress(self,text):
         self.progress_label.setText(text);self.statusBar().showMessage(text)
 
-    def task_finished(self):self.scan_button.setEnabled(True); self.add_button.setEnabled(True); self.stop_button.hide();self.progress_bar.hide()
+    def task_finished(self):self.scan_button.setEnabled(True); self.add_button.setEnabled(True); self.stop_button.hide();self.progress_bar.hide();self.update_file_selection()
 
     def scan(self):
         if not self.confirm_pending(): return
@@ -638,13 +671,12 @@ class Window(QMainWindow):
 
     def ensure_duplicates(self):
         if self.duplicate_dialog is None:
-            self.duplicate_dialog=DuplicatesDialog(self.store,self.run_duplicates,self.cancel_duplicates,self)
-            self.duplicate_dialog.copyRequested.connect(self.export_rows)
-            self.duplicate_dialog.recycleRequested.connect(self.preview_duplicates)
-            self.duplicate_dialog.suggestRequested.connect(self.suggest_duplicates)
+            self.duplicate_dialog=NameMatchesPage(self.run_name_detection,self)
+            self.duplicate_dialog.recycleRequested.connect(self.preview_name_matches)
             self.pages.addWidget(self.duplicate_dialog)
 
     def invalidate_duplicates(self):
+        self.duplicate_revision+=1
         state=self.store.setting('state:duplicates',{})
         if state.get('complete'):
             self.store.set_setting('state:duplicates',dict(state,complete=False))
@@ -655,51 +687,31 @@ class Window(QMainWindow):
         if result.get('changed') or result.get('deleted') or result.get('errors'):
             self.invalidate_duplicates()
 
-    def suggest_duplicates(self):
-        if self.worker and self.worker.isRunning():return
-        self.task_kind='suggest'
-        self.start_worker(
-            lambda progress:build_selection(self.delete_service,QThread.currentThread().isInterruptionRequested,progress),
-            self.suggestions_done,True)
-
-    def suggestions_done(self,out):
-        if 'error' in out:
-            self.update_progress(out['error'])
+    def run_name_detection(self):
+        if self.worker and self.worker.isRunning():
+            self.update_progress('当前有任务在运行，可先点「停止任务」。')
             return
-        draft=out['result']
-        state=self.store.setting('state:duplicates',{})
-        if not state.get('complete') or state.get('time')!=draft.stamp:
-            self.update_progress('索引已更新，请重新检测。')
-            return
-        self.duplicate_dialog.apply_suggestions(draft)
-        self.update_progress(f'建议已生成，{len(draft.blocked):,} 个文件待核对或不符合清理条件。')
+        revision=self.duplicate_revision
+        self.update_progress('正在查找名称相近的文件…')
+        def detect(progress):
+            cancelled=QThread.currentThread().isInterruptionRequested
+            try:
+                return name_groups(self.store,cancelled,progress)
+            except HashCancelled:
+                return None
+        self.start_worker(detect,lambda out:self.name_detection_done(out,revision),True)
 
-    def preview_duplicates(self,rows):
-        from dataclasses import replace
-        draft=self.duplicate_dialog.draft
-        if draft:
-            draft=replace(draft,keepers=dict(draft.keepers))
-        self.delete_paths([row['path'] for row in rows],True,draft,guarded=True)
-
-    def run_duplicates(self):
-        if not self.confirm_pending():return
-        if self.worker and self.worker.isRunning():QMessageBox.information(self,'任务运行中','请等待当前扫描、检测或导出完成。');return
-        self.invalidate_duplicates()
-        self.task_kind='duplicates'
-        self.start_worker(lambda progress:self.store.detect_duplicates(progress,lambda:QThread.currentThread().isInterruptionRequested()),self.duplicates_done,True)
-
-    def cancel_duplicates(self):
-        if self.worker and self.worker.isRunning():self.worker.requestInterruption()
-
-    def duplicates_done(self,out):
-        if 'error' in out:
-            self.store.set_setting('state:duplicates',{'complete':False,'running':False,'errors':[out['error']]})
-            if self.duplicate_dialog:self.duplicate_dialog.refresh()
-            self.update_progress('重复检测失败：'+out['error']);return
-        if self.duplicate_dialog:self.duplicate_dialog.refresh()
-        r=out['result'];self.progress_label.setText(f'重复检测：'+('已取消' if r['cancelled'] else '已完成')+f'；计算 {r["hashed"]}，缓存 {r["cache_hits"]}，跳过 {r["skipped"]}')
-        self.progress_label.setToolTip('\n'.join(r['errors'][:12]))
-        if self.statistics_dialog and self.statistics_dialog.isVisible():self.statistics_dialog.refresh()
+    def name_detection_done(self,out,revision):
+        if revision!=self.duplicate_revision:
+            self.update_progress('索引已变化，请重新查找相近名称。')
+        elif 'error' in out:
+            self.update_progress('名称查找失败：'+out['error'])
+        elif out['result'] is None:
+            self.update_progress('已停止名称查找。')
+        else:
+            groups,skipped=out['result']
+            self.duplicate_dialog.set_results(groups,f'名称相近 {len(groups):,} 组 · 跳过 {skipped:,} 个文件。请核对内容后勾选。')
+            self.update_progress('展开文件组，单击文件可在右侧预览。')
 
     def start_monitor(self):
         if self.monitor and self.monitor.thread and self.monitor.thread.is_alive():return
@@ -749,22 +761,19 @@ class Window(QMainWindow):
         r=out['result'];self.reload(preserve=True);self.refresh_tag_nodes()
         QMessageBox.information(self,'批量操作结果',f'成功 {r["success"]:,}；实际变更 {r["changed"]:,}；失败 {len(r["failures"])}'+('\n已取消，未提交变更' if r['cancelled'] else '')+'\n'+'\n'.join(r['failures'][:10]))
 
-    def delete_paths(self,paths,duplicate=False,selection=None,guarded=False):
+    def preview_name_matches(self,rows):
+        snapshots={row['path']:indexed_signature(row) for row in rows}
+        self.delete_paths(list(snapshots),expected_snapshots=snapshots)
+
+    def delete_paths(self,paths,expected_snapshots=None):
         if not paths:QMessageBox.information(self,'选择文件','请主动选择需要处理的文件。');return
         if not self.confirm_pending():return
         if self.worker and self.worker.isRunning():QMessageBox.information(self,'任务运行中','请等待当前任务完成再准备删除。');return
         self.task_kind='delete_prepare'
         def prepare(progress):
             cancelled=QThread.currentThread().isInterruptionRequested
-            draft=selection
-            if guarded and draft is None:
-                draft=build_selection(self.delete_service,cancelled,progress)
-                chosen=set(paths)
-                for path,row in draft.eligible.items():
-                    group=row['group']
-                    if draft.keepers[group] in chosen and path not in chosen:
-                        draft.keepers[group]=path
-            return self.delete_service.prepare(paths,duplicate,cancelled,progress,draft)
+            return self.delete_service.prepare(paths,cancelled=cancelled,progress=progress,
+                                               expected_snapshots=expected_snapshots)
         self.start_worker(prepare,self.delete_prepared,True)
 
     def delete_prepared(self,out):

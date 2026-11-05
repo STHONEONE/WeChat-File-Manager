@@ -43,7 +43,7 @@ def run(window,data):
     window.table.selectRow(0);window.jump_to_directory();assert window.active_directory is not None
     assert window.active_directory['path']==canonical(source)
     window.directory_mode.setCurrentIndex(0)
-    window.show_duplicates();assert not window.duplicate_dialog.model.checked_rows()
+    window.show_duplicates();assert not window.duplicate_dialog.checked
     window.switch_page('directory')
     window.query.clear();window.reload();QApplication.processEvents()
     assert window.grab().save(str(data/'selftest.png'))

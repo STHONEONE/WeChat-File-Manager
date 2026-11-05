@@ -1,14 +1,14 @@
 from datetime import datetime
 from pathlib import Path
 from PySide6.QtCore import Qt,QAbstractTableModel,QModelIndex,Signal
-from PySide6.QtWidgets import QDialog,QVBoxLayout,QLabel,QTreeWidget,QTreeWidgetItem,QCheckBox,QDialogButtonBox,QPushButton,QTableView
+from PySide6.QtWidgets import QDialog,QVBoxLayout,QLabel,QTreeWidget,QTreeWidgetItem,QCheckBox,QDialogButtonBox,QPushButton,QTableView,QPlainTextEdit
 from app.paths import human
 
 RESULT_LABELS={'pending':'执行中 / 待核对','success':'已移入回收站','failed':'失败','skipped':'跳过','cancelled':'已取消','uncertain':'需核对回收站'}
 
 class CleanupPreview(QAbstractTableModel):
     changed=Signal()
-    columns=['待处理文件','大小','账号','原始路径','预检查','保留文件路径']
+    columns=['移入回收站','保留文件','大小','账号','预检查']
 
     def __init__(self,items,parent):
         super().__init__(parent)
@@ -32,9 +32,11 @@ class CleanupPreview(QAbstractTableModel):
         item=self.items[index.row()]
         if role==Qt.ItemDataRole.CheckStateRole and index.column()==0:
             return Qt.CheckState.Checked if item.allowed and item.path not in self.excluded else Qt.CheckState.Unchecked
+        if role==Qt.ItemDataRole.ToolTipRole and index.column()<2:
+            return item.path if index.column()==0 else item.keeper.path if item.keeper else ''
         if role in (Qt.ItemDataRole.DisplayRole,Qt.ItemDataRole.ToolTipRole):
-            return (Path(item.path).name,human(item.size),item.account_name,item.path,
-                    '可检查执行' if item.allowed else item.reason,item.keeper.path if item.keeper else '')[index.column()]
+            return (Path(item.path).name,Path(item.keeper.path).name if item.keeper else '',
+                    human(item.size),item.account_name,'待确认' if item.allowed else item.reason)[index.column()]
 
     def flags(self,index):
         flags=super().flags(index)
@@ -67,8 +69,15 @@ class DeleteDialog(QDialog):
         summary.setWordWrap(True);summary.setTextFormat(Qt.TextFormat.PlainText);layout.addWidget(summary)
         self.list=QTableView();self.list.setMinimumHeight(65);self.list.setModel(self.preview_model);layout.addWidget(self.list,1)
         self.list.verticalHeader().hide()
-        self.list.setColumnWidth(0,155);self.list.setColumnWidth(3,260)
-        self.list.setColumnHidden(5,not any(item.keeper for item in plan.items))
+        self.list.setColumnWidth(0,170);self.list.setColumnWidth(1,155);self.list.setColumnWidth(2,72)
+        self.list.setColumnHidden(1,not any(item.keeper for item in plan.items))
+        self.paths=QPlainTextEdit()
+        self.paths.setReadOnly(True);self.paths.setFixedHeight(64)
+        self.paths.setAccessibleName('所选行的完整路径')
+        self.paths.setPlaceholderText('选中一行查看完整路径')
+        layout.addWidget(self.paths)
+        self.list.selectionModel().currentChanged.connect(self.show_paths)
+        if plan.items:self.list.setCurrentIndex(self.preview_model.index(0,0))
         self.selected_ack=QCheckBox('我确认仅处理以上清单中的文件。');layout.addWidget(self.selected_ack)
         warning=QLabel('这些是微信管理的原始文件，不同聊天可能分别引用各路径。内容相同也不表示可以安全删除其他路径；移入回收站后，微信可能无法打开对应附件。');warning.setWordWrap(True);layout.addWidget(warning)
         self.original_ack=QCheckBox('我已了解路径引用风险，确认移入回收站。')
@@ -88,6 +97,13 @@ class DeleteDialog(QDialog):
 
     def excluded_paths(self):
         return frozenset(self.preview_model.excluded)
+
+    def show_paths(self,current,previous):
+        if not current.isValid():return
+        item=self.plan.items[current.row()]
+        text=f'待回收：{item.path}'
+        if item.keeper:text=f'保留：{item.keeper.path}\n'+text
+        self.paths.setPlainText(text)
 
 class DeleteHistoryDialog(QDialog):
     def __init__(self,service,parent=None):
