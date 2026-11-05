@@ -60,7 +60,7 @@ class DeleteService:
         if not s.st_ino or signature(s)!=item.snapshot or indexed_signature(row)!=item.snapshot:raise ValueError('文件大小、时间或身份已变化，请刷新后重新选择。')
         if time.time()-max(s.st_mtime,s.st_ctime)<self.settle_seconds:raise ValueError('文件最近仍在变化，请等待稳定后重新确认。')
 
-    def prepare(self,paths,duplicate=False,cancelled=lambda:False,progress=lambda text:None,selection=None):
+    def prepare(self,paths,duplicate=False,cancelled=lambda:False,progress=lambda text:None,selection=None,expected_snapshots=None):
         from dataclasses import replace
         from app.duplicate_detector import VALID_JOIN
         paths=list(dict.fromkeys(canonical(path) for path in paths))
@@ -80,6 +80,8 @@ class DeleteService:
                 if cache and indexed_signature(cache)==indexed_signature(row):expected=cache['sha256']
             item=DeleteItem(path,row['account'],row['account_name'],row['size'],indexed_signature(row),expected)
             try:
+                if expected_snapshots is not None and expected_snapshots.get(path)!=item.snapshot:
+                    raise ValueError('文件已与查找结果不同，请重新查找后再勾选。')
                 self._validate(item)
                 if duplicate and not expected:raise ValueError('没有有效重复检测哈希，请重新检测后选择。')
                 if duplicate:

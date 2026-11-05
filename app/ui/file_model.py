@@ -4,6 +4,7 @@ from app.paths import human
 
 class FilesModel(QAbstractTableModel):
     sortRequested=Signal(int,object)
+    checksChanged=Signal()
     columns=['文件名','类型','大小','修改时间','所属账号','标签','收藏']
     def __init__(self):
         super().__init__(); self.rows=[];self.store=None;self.total=0;self.filters={};self.order='mtime';self.descending=True;self.checkable=False;self.checked_paths=set()
@@ -33,10 +34,20 @@ class FilesModel(QAbstractTableModel):
             path=self.rows[index.row()]['path']
             if value in (Qt.CheckState.Checked,Qt.CheckState.Checked.value):self.checked_paths.add(path)
             else:self.checked_paths.discard(path)
-            self.dataChanged.emit(index,index,[role]);return True
+            self.dataChanged.emit(index,index,[role]);self.checksChanged.emit();return True
         return False
 
     def checked_rows(self):return [row for row in self.rows if row['path'] in self.checked_paths]
+
+    def set_checkable(self,enabled):
+        self.checkable=enabled
+        self.clear_checks()
+
+    def clear_checks(self):
+        self.checked_paths.clear()
+        if self.rows:
+            self.dataChanged.emit(self.index(0,0),self.index(len(self.rows)-1,0),[Qt.ItemDataRole.CheckStateRole])
+        self.checksChanged.emit()
 
     def configure(self,store,filters,order,descending,page):
         self.beginResetModel()

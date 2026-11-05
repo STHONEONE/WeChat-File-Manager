@@ -1,8 +1,15 @@
-from PySide6.QtCore import Qt,Signal,QUrl
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QWidget,QMenu,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QComboBox,QCheckBox,QTreeWidget,QTreeWidgetItem,QTableView,QMessageBox,QScrollArea,QFrame
+from pathlib import Path
+
+from PySide6.QtCore import Qt, Signal, QUrl, QSignalBlocker
+from PySide6.QtGui import QDesktopServices, QPixmap
+from PySide6.QtWidgets import (QApplication, QFrame, QHeaderView, QHBoxLayout, QLabel, QMenu,
+                               QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter,
+                               QSizePolicy, QStackedWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+
+from app.directory_mapper import deletion_path_allowed
 from app.paths import human
-from app.ui.file_model import FilesModel
+from app.ui.preview import PreviewController
+
 
 def locate(path):
     import os,sys,subprocess
@@ -18,296 +25,253 @@ def open_path(path,parent):
         if QMessageBox.question(parent,'运行文件','此文件是程序或脚本，是否调用系统打开？')!=QMessageBox.StandardButton.Yes:return
     if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(p))):QMessageBox.warning(parent,'打开失败','请检查系统文件关联。')
 
-class DuplicateMembers(FilesModel):
-    def __init__(self, page):
-        super().__init__()
-        self.page = page
-        self.checkable = True
-        self.columns = [*FilesModel.columns, '清理建议']
-
-    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if index.isValid() and index.column() == 7:
-            if role == Qt.ItemDataRole.DisplayRole:
-                return self.page.member_status(self.rows[index.row()])
-            return None
-        return super().data(index, role)
-
-    def flags(self, index):
-        flags = super().flags(index)
-        if index.isValid() and not self.page.can_check(self.rows[index.row()]):
-            flags &= ~Qt.ItemFlag.ItemIsUserCheckable
-        return flags
-
-    def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
-        if not index.isValid() or not self.page.can_check(self.rows[index.row()]):
-            return False
-        if not super().setData(index, value, role):
-            return False
-        row = self.rows[index.row()]
-        self.page.set_checked(row, row['path'] in self.checked_paths)
-        return True
-
-
-class DuplicatesDialog(QWidget):
-    """Persistent duplicates page; selections outlive the displayed model rows."""
-
-    copyRequested = Signal(list)
+class NameMatchesPage(QWidget):
     recycleRequested = Signal(list)
-    suggestRequested = Signal()
+    role = Qt.ItemDataRole.UserRole
 
-    def __init__(self, store, detect, cancel, parent=None):
+    def __init__(self, detect, parent=None):
         super().__init__(parent)
-        self.store = store
-        self.group_rows = []
+        self.matches = []
+        self.visible_members = {}
         self.checked = {}
         self.checked_size = 0
-        self.draft = None
-        self.complete = False
-        page_layout = QVBoxLayout(self)
-        page_layout.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidgetResizable(True)
-        scroll.setMinimumHeight(110)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        content = QWidget()
-        content.setObjectName('workspace')
-        scroll.setWidget(content)
-        page_layout.addWidget(scroll, 1)
-        layout = QVBoxLayout(content)
+        self.current_row = None
+        self.preview_image = None
+
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 0)
+        toolbar = QHBoxLayout()
+        layout.addLayout(toolbar)
+        self.detect_button = QPushButton('查相近名称')
+        self.detect_button.setProperty('kind', 'primary')
+        self.detect_button.clicked.connect(detect)
+        toolbar.addWidget(self.detect_button)
+        toolbar.addStretch()
         self.summary = QLabel()
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
-        actions = QHBoxLayout()
-        layout.addLayout(actions)
-        self.button(actions, '检测重复文件', detect)
-        self.suggest = self.button(actions, '一键勾选多余副本', lambda: self.suggestRequested.emit())
-        self.suggest.setProperty('kind', 'primary')
-        self.button(actions, '清空选择', self.clear_selection)
-        self.button(actions, '取消任务', cancel)
-        actions.addStretch()
 
-        filters = QHBoxLayout()
-        layout.addLayout(filters)
-        self.order = QComboBox()
-        self.order.addItems(['理论冗余容量', '重复数量', '总大小'])
-        filters.addWidget(self.order)
-        self.cross = QCheckBox('只看跨账号重复')
-        filters.addWidget(self.cross)
-        filters.addStretch()
-        self.more_groups = self.button(filters, '更多重复组', self.load_groups)
+        splitter = QSplitter()
+        layout.addWidget(splitter, 1)
         self.groups = QTreeWidget()
-        self.groups.setMinimumHeight(45)
-        self.groups.setRootIsDecorated(False)
-        self.groups.setHeaderLabels(['文件示例', '单份大小', '份数', '所属账号', '理论冗余'])
-        self.groups.setColumnWidth(0, 205)
-        layout.addWidget(self.groups, 1)
+        self.groups.setMinimumHeight(60)
+        self.groups.setHeaderLabels(['文件 / 名称相近组', '大小'])
+        self.groups.setAlternatingRowColors(True)
+        self.groups.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.groups.setColumnWidth(1, 76)
+        splitter.addWidget(self.groups)
 
-        members_bar = QHBoxLayout()
-        layout.addLayout(members_bar)
-        self.keeper_button = self.button(members_bar, '将当前文件设为保留项', self.set_keeper)
-        self.keeper_button.setEnabled(False)
-        members_bar.addStretch()
-        self.more_members = self.button(members_bar, '更多组内文件', self.load_members)
-        self.model = DuplicateMembers(self)
-        self.members = QTableView()
-        self.members.setMinimumHeight(45)
-        self.members.setModel(self.model)
-        self.members.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.members.setSelectionMode(QTableView.SelectionMode.ExtendedSelection)
-        self.members.setColumnWidth(0, 200)
-        self.members.setColumnWidth(2, 72)
-        self.members.setColumnWidth(7, 120)
-        self.members.horizontalHeader().moveSection(7, 1)
-        for column in (1, 3, 5, 6):
-            self.members.setColumnHidden(column, True)
-        self.members.verticalHeader().hide()
-        layout.addWidget(self.members, 1)
-        self.path = QLabel('选择组内文件查看真实路径')
-        self.path.setTextFormat(Qt.TextFormat.PlainText)
-        self.path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.path.setMinimumWidth(0)
-        layout.addWidget(self.path)
+        details = QWidget()
+        details.setMinimumWidth(170)
+        panel = QVBoxLayout(details)
+        panel.setContentsMargins(8, 0, 0, 0)
+        panel.addWidget(QLabel('文件预览'))
+        self.details = QLabel('展开一组，选择要查看的文件。')
+        self.details.setTextFormat(Qt.TextFormat.PlainText)
+        self.details.setWordWrap(True)
+        panel.addWidget(self.details)
+        self.preview_stack = QStackedWidget()
+        self.preview = QLabel()
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setWordWrap(True)
+        self.preview.setMinimumSize(90, 45)
+        self.preview.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Ignored)
+        self.preview_stack.addWidget(self.preview)
+        self.text_preview = QPlainTextEdit()
+        self.text_preview.setReadOnly(True)
+        self.text_preview.setAccessibleName('文本文件预览')
+        self.preview_stack.addWidget(self.text_preview)
+        panel.addWidget(self.preview_stack, 1)
+        self.path = QPlainTextEdit()
+        self.path.setReadOnly(True)
+        self.path.setFixedHeight(48)
+        self.path.setAccessibleName('当前文件的完整路径')
+        panel.addWidget(self.path)
+        self.open_button = QPushButton('打开文件')
+        self.open_button.clicked.connect(self.open_current)
+        panel.addWidget(self.open_button)
+        detail_scroll = QScrollArea()
+        detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        detail_scroll.setWidgetResizable(True)
+        detail_scroll.setMinimumHeight(80)
+        detail_scroll.setMinimumWidth(175)
+        detail_scroll.setWidget(details)
+        splitter.addWidget(detail_scroll)
+        splitter.setCollapsible(1, False)
+        splitter.setSizes([570, 290])
+
         footer = QHBoxLayout()
-        page_layout.addLayout(footer)
+        layout.addLayout(footer)
+        self.more_button = QPushButton('更多文件组')
+        self.more_button.clicked.connect(self.load_groups)
+        footer.addWidget(self.more_button)
         self.selection_label = QLabel()
         footer.addWidget(self.selection_label, 1)
-        self.recycle = self.button(footer, '预览清理清单', lambda: self.recycleRequested.emit(list(self.checked.values())))
-        self.recycle.setProperty('kind', 'danger')
-        self.groups.itemSelectionChanged.connect(self.group_changed)
-        self.members.selectionModel().selectionChanged.connect(self.member_changed)
-        self.members.doubleClicked.connect(self.open_selected)
-        self.members.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.members.customContextMenuRequested.connect(self.member_menu)
-        self.order.currentIndexChanged.connect(self.refresh)
-        self.cross.toggled.connect(self.refresh)
-        self.refresh()
+        self.clear_button = QPushButton('清空勾选')
+        self.clear_button.clicked.connect(self.clear_selection)
+        footer.addWidget(self.clear_button)
+        self.recycle_button = QPushButton()
+        self.recycle_button.setProperty('kind', 'danger')
+        self.recycle_button.clicked.connect(self.preview_cleanup)
+        footer.addWidget(self.recycle_button)
 
-    @staticmethod
-    def button(layout, label, handler):
-        button = QPushButton(label)
-        button.clicked.connect(handler)
-        layout.addWidget(button)
-        return button
+        self.decoder = PreviewController(self)
+        self.decoder.ready.connect(self.preview_ready)
+        self.groups.itemExpanded.connect(self.expand_group)
+        self.groups.currentItemChanged.connect(self.show_current)
+        self.groups.itemChanged.connect(self.check_changed)
+        self.groups.itemActivated.connect(self.activate_item)
+        self.groups.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.groups.customContextMenuRequested.connect(self.file_menu)
+        self.set_results([], '点击「查相近名称」，按文件名前缀查找。')
+
+    def set_results(self, groups, summary):
+        self.matches = groups
+        self.summary.setText(summary)
+        self.groups.clear()
+        self.visible_members.clear()
+        self.clear_selection()
+        self.show_current(None)
+        self.load_groups()
+        if groups:
+            self.groups.setCurrentItem(self.groups.topLevelItem(0))
+            self.groups.topLevelItem(0).setExpanded(True)
 
     def invalidate(self):
-        self.draft = None
-        self.clear_selection()
-        self.refresh()
-
-    def refresh(self, *args):
-        key = self.group_key()
-        summary = self.store.duplicate_summary()
-        state = summary['state']
-        self.complete = bool(state.get('complete') and not state.get('running'))
-        if self.draft and (not self.complete or self.draft.stamp != state.get('time')):
-            self.draft = None
-            self.clear_selection()
-        status = '检测结果可用' if self.complete else '请检测或重新检测重复文件'
-        self.summary.setText(
-            f'已确认 {summary["groups"]:,} 组  ·  {summary["files"]:,} 个文件  ·  '
-            f'理论冗余 {human(summary["redundant"])}\n{status}。一键勾选覆盖全部账号，预览后由你确认。'
-        )
-        self.suggest.setEnabled(self.complete and summary['groups'] > 0)
-        limit = len(self.group_rows)
-        self.groups.clear()
-        self.group_rows = []
-        self.load_groups()
-        if key:
-            while len(self.group_rows) < limit and self.more_groups.isEnabled():
-                self.load_groups()
-            for i, row in enumerate(self.group_rows):
-                if (row['sha256'], row['size']) == key:
-                    self.groups.setCurrentItem(self.groups.topLevelItem(i))
-                    break
-        self.update_selection()
+        self.set_results([], '索引已更新，请重新查找相近名称。')
 
     def load_groups(self):
-        rows = self.store.duplicate_groups(
-            ['redundant', 'count', 'total'][self.order.currentIndex()],
-            self.cross.isChecked(), offset=len(self.group_rows))
-        for row in rows:
-            accounts = row['sample_account'] or '未知账号'
-            if row['accounts'] > 1:
-                accounts += f' 等 {row["accounts"]} 个账号'
-            item = QTreeWidgetItem(self.groups, [
-                row['sample_name'], human(row['size']), str(row['count']),
-                accounts, human(row['redundant'])])
-            item.setToolTip(0, row['sha256'])
-            item.setData(0, Qt.ItemDataRole.UserRole, row)
-        self.group_rows.extend(rows)
-        self.more_groups.setEnabled(len(rows) == 200)
+        offset = self.groups.topLevelItemCount()
+        for rows in self.matches[offset:offset + 150]:
+            group = QTreeWidgetItem(self.groups, [f'{rows[0]["name"]} · {len(rows):,} 个文件',
+                                                 human(sum(row['size'] for row in rows))])
+            group.setData(0, self.role, rows)
+            group.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+        self.more_button.setVisible(self.groups.topLevelItemCount() < len(self.matches))
 
-    def group_key(self):
-        item = self.groups.currentItem()
-        if item:
-            group = item.data(0, Qt.ItemDataRole.UserRole)
-            return group['sha256'], group['size']
-        return None
+    def expand_group(self, item):
+        if item.parent() is None and item.childCount() == 0:
+            self.load_members(item)
 
-    def group_changed(self):
-        self.model.replace([])
-        self.path.setText('选择组内文件查看真实路径')
-        self.load_members()
+    def load_members(self, group):
+        rows = group.data(0, self.role)
+        offset = group.childCount()
+        tail = group.child(offset - 1) if offset else None
+        if tail and tail.data(0, self.role) is None:
+            group.takeChild(offset - 1)
+            offset -= 1
+        with QSignalBlocker(self.groups):
+            for row in rows[offset:offset + 150]:
+                child = QTreeWidgetItem(group, [row['name'], human(row['size'])])
+                child.setData(0, self.role, row)
+                child.setToolTip(0, row['path'])
+                if deletion_path_allowed(row['path'], row['account']):
+                    child.setCheckState(0, Qt.CheckState.Checked if row['path'] in self.checked else Qt.CheckState.Unchecked)
+                    self.visible_members.setdefault(row['path'], []).append(child)
+                else:
+                    child.setFlags(child.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+                    child.setToolTip(0, '仅查看 · ' + row['path'])
+            if offset + 150 < len(rows):
+                QTreeWidgetItem(group, ['双击加载本组更多文件…'])
 
-    def load_members(self):
-        key = self.group_key()
-        rows = self.store.duplicate_members(*key, offset=len(self.model.rows)) if key else []
-        self.model.replace(self.model.rows + rows)
-        self.more_members.setEnabled(len(rows) == 200)
-        self.sync_checks()
-
-    def sync_checks(self):
-        self.model.checked_paths = {row['path'] for row in self.model.rows if row['path'] in self.checked}
-        if self.model.rows:
-            self.model.dataChanged.emit(self.model.index(0, 0),
-                                        self.model.index(len(self.model.rows) - 1, 7))
-        self.update_selection()
-        self.member_changed()
-
-    def apply_suggestions(self, draft):
-        if self.draft and self.draft.stamp == draft.stamp:
-            for group, path in self.draft.keepers.items():
-                if path in draft.eligible:
-                    draft.keepers[group] = path
-        self.draft = draft
-        self.checked = draft.suggestions()
-        self.checked_size = sum(row['size'] for row in self.checked.values())
-        self.sync_checks()
-
-    def clear_selection(self):
-        self.checked.clear()
-        self.checked_size = 0
-        self.sync_checks()
-
-    def set_checked(self, row, checked):
+    def check_changed(self, item, column):
+        row = item.data(0, self.role) if item.parent() and column == 0 else None
+        if not row or not deletion_path_allowed(row['path'], row['account']):
+            return
         path = row['path']
-        if checked and path not in self.checked:
+        state = item.checkState(0)
+        if state == Qt.CheckState.Checked and path not in self.checked:
             self.checked[path] = row
             self.checked_size += row['size']
-        elif not checked and path in self.checked:
+        elif state != Qt.CheckState.Checked and path in self.checked:
             self.checked_size -= self.checked.pop(path)['size']
+        with QSignalBlocker(self.groups):
+            for other in self.visible_members[path]:
+                if other is not item:
+                    other.setCheckState(0, state)
         self.update_selection()
 
-    def can_check(self, row):
-        if not self.draft:
-            from app.directory_mapper import deletion_path_allowed
-            return self.complete and deletion_path_allowed(row['path'], row['account'])
-        return row['path'] in self.draft.eligible and self.draft.keepers.get(self.group_key()) != row['path']
-
-    def member_status(self, row):
-        if not self.draft:
-            return '待检查' if self.can_check(row) else '不可清理'
-        path = row['path']
-        if path not in self.draft.eligible:
-            return '待核对 / 不可清理'
-        return '建议清理' if self.can_check(row) else '建议保留'
+    def clear_selection(self):
+        with QSignalBlocker(self.groups):
+            for path in self.checked:
+                for item in self.visible_members.get(path, ()):
+                    item.setCheckState(0, Qt.CheckState.Unchecked)
+        self.checked.clear()
+        self.checked_size = 0
+        self.update_selection()
 
     def update_selection(self):
-        self.selection_label.setText(f'已勾选 {len(self.checked):,} 个文件  ·  {human(self.checked_size)}')
-        self.recycle.setEnabled(self.complete and bool(self.checked))
+        count = len(self.checked)
+        self.selection_label.setText(f'已勾选 {count:,} 项 · {human(self.checked_size)}')
+        self.clear_button.setEnabled(bool(count))
+        self.recycle_button.setEnabled(bool(count))
+        self.recycle_button.setText(f'预览删除 {count:,} 项' if count else '预览删除')
 
-    def set_keeper(self):
-        rows = self.selected()
-        if not self.draft or len(rows) != 1 or rows[0]['path'] not in self.draft.eligible:
+    def preview_cleanup(self):
+        if self.checked:
+            self.recycleRequested.emit(list(self.checked.values()))
+
+    def show_current(self, item, previous=None):
+        self.decoder.clear()
+        row = item.data(0, self.role) if item and item.parent() else None
+        self.current_row = row
+        self.preview_image = None
+        self.preview_stack.setCurrentIndex(0)
+        self.preview.clear()
+        self.open_button.setEnabled(bool(row))
+        self.path.setPlainText(row['path'] if row else '')
+        if not row:
+            self.details.setText('展开一组，选择要查看的文件。')
+            if item and item.parent() is None:
+                item.setExpanded(True)
             return
-        path = rows[0]['path']
-        key = self.group_key()
-        previous = self.draft.keepers[key]
-        if previous == path:
+        self.details.setText(f'{row["name"]}\n{row["account_name"]} · {human(row["size"])}')
+        extension = Path(row['name']).suffix.lower()
+        if row['category'] == '图片' or extension in {'.pdf', '.txt', '.md', '.csv'}:
+            self.preview.setText('正在读取预览…')
+            self.decoder.request(row['path'], row['size'], documents=True)
+        else:
+            self.preview.setText('点击下方「打开文件」查看内容。')
+
+    def preview_ready(self, result, message):
+        if isinstance(result, str):
+            self.text_preview.setPlainText(result)
+            self.preview_stack.setCurrentIndex(1)
+        elif message:
+            self.preview.setText(message)
+        elif result is not None:
+            self.preview_image = result
+            self.update_image()
+
+    def update_image(self):
+        if self.preview_image is not None:
+            self.preview.setPixmap(QPixmap.fromImage(self.preview_image).scaled(
+                self.preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_image()
+
+    def activate_item(self, item, column):
+        if item.parent() and item.data(0, self.role) is None:
+            self.load_members(item.parent())
+        elif item.parent():
+            self.open_current()
+        else:
+            item.setExpanded(not item.isExpanded())
+
+    def open_current(self):
+        if self.current_row:
+            open_path(self.current_row['path'], self)
+
+    def file_menu(self, position):
+        item = self.groups.itemAt(position)
+        row = item.data(0, self.role) if item and item.parent() else None
+        if not row:
             return
-        if self.checked.pop(path, None):
-            self.checked[previous] = self.draft.eligible[previous]
-        self.draft.keepers[key] = path
-        self.sync_checks()
-
-    def selected(self):
-        return [self.model.rows[i.row()] for i in self.members.selectionModel().selectedRows()]
-
-    def member_changed(self, *args):
-        rows = self.selected()
-        self.keeper_button.setEnabled(bool(self.draft and len(rows) == 1 and rows[0]['path'] in self.draft.eligible))
-        if rows:
-            path = rows[0]['path']
-            reason = self.draft.blocked.get(path, '') if self.draft else ''
-            text = (reason + ' · ' if reason else '') + path
-            self.path.setToolTip(text)
-            self.path.setText(self.path.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, max(100, self.width() - 12)))
-
-    def member_menu(self, position):
-        rows = self.selected()
-        if not rows:
-            return
-        from PySide6.QtWidgets import QApplication
+        path = row['path']
         menu = QMenu(self)
-        menu.addAction('打开文件', self.open_selected)
-        menu.addAction('打开所在文件夹', lambda: locate(rows[0]['path']))
-        menu.addAction('复制路径', lambda: QApplication.clipboard().setText('\n'.join(row['path'] for row in rows)))
-        menu.addAction('复制归档所选', lambda: self.copyRequested.emit(rows))
-        menu.exec(self.members.viewport().mapToGlobal(position))
-
-    def open_selected(self, *args):
-        rows = self.selected()
-        if rows:
-            open_path(rows[0]['path'], self)
+        menu.addAction('打开文件', lambda: open_path(path, self))
+        menu.addAction('打开所在文件夹', lambda: locate(path))
+        menu.addAction('复制完整路径', lambda: QApplication.clipboard().setText(path))
+        menu.exec(self.groups.viewport().mapToGlobal(position))
